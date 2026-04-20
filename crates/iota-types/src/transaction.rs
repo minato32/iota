@@ -48,7 +48,7 @@ use crate::{
     message_envelope::{Envelope, Message, TrustedEnvelope, VerifiedEnvelope},
     messages_checkpoint::CheckpointTimestamp,
     move_authenticator::MoveAuthenticator,
-    object::{MoveObject, Object},
+    object::{self, MoveObject, Object},
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     signature::{GenericSignature, VerifyParams},
     signature_verification::verify_sender_signed_data_message_signatures,
@@ -2160,6 +2160,19 @@ impl SenderSignedData {
         Ok(input_objects_set.into_iter().collect::<Vec<_>>())
     }
 
+    pub fn built_in_account_objects(&self) -> IotaResult<Vec<ObjectId>> {
+        self.tx_signatures()
+            .iter()
+            .filter_map(|sig| match sig {
+                GenericSignature::MoveAuthenticator(_) => None,
+                _ => Some(
+                    sig.try_into()
+                        .map(|signer: Address| ObjectId::from(signer)),
+                ),
+            })
+            .collect::<IotaResult<Vec<_>>>()
+    }
+
     /// Splits the provided input objects into groups:
     /// 1. Input objects required by the transaction itself; may contain
     ///    duplicates if an IOTA coin is used both as an input and a gas coin.
@@ -3318,6 +3331,133 @@ impl ReceivingObjects {
 
 impl From<Vec<ReceivingObjectReadResult>> for ReceivingObjects {
     fn from(objects: Vec<ReceivingObjectReadResult>) -> Self {
+        Self { objects }
+    }
+}
+
+// Result of attempting to read a built in account object. An object might exist
+// in the ledger, thus being Explicit, or it may not, thus being Implicit.
+#[derive(Clone, Debug)]
+pub enum BuiltInAccountObjectReadResultKind {
+    Explicit(Object),
+    // The account object is not actually present in the ledger.
+    Implicit,
+}
+
+impl BuiltInAccountObjectReadResultKind {
+    pub fn as_object(&self) -> Option<&Object> {
+        match &self {
+            Self::Explicit(object) => Some(object),
+            Self::Implicit => None,
+        }
+    }
+}
+
+pub struct BuiltInAccountObjectReadResult {
+    pub object_id: ObjectId,
+    pub object: BuiltInAccountObjectReadResultKind,
+}
+
+impl BuiltInAccountObjectReadResult {
+    pub fn new(object_id: ObjectId, object: BuiltInAccountObjectReadResultKind) -> Self {
+        Self { object_id, object }
+    }
+
+    pub fn is_explicit_immutable(&self) -> bool {
+        matches!(
+            &self.object,
+            BuiltInAccountObjectReadResultKind::Explicit(obj) if obj.is_immutable()
+        )
+    }
+
+    pub fn compute_object_reference(&self) -> Option<ObjectRef> {
+        self.object.as_object().map(|obj| obj.object_ref())
+    }
+
+    pub fn initial_shared_version(&self) -> Option<SequenceNumber> {
+        match &self.object {
+            BuiltInAccountObjectReadResultKind::Explicit(obj) => match obj.owner() {
+                Owner::Shared(initial_shared_version) => Some(*initial_shared_version),
+                _ => None,
+            },
+            BuiltInAccountObjectReadResultKind::Implicit => Some(object::OBJECT_START_VERSION),
+        }
+    }
+
+    pub fn is_implicit(&self) -> bool {
+        matches!(self.object, BuiltInAccountObjectReadResultKind::Implicit)
+    }
+
+    pub fn is_shared_or_implicit(&self) -> bool {
+        match &self.object {
+            BuiltInAccountObjectReadResultKind::Implicit => true,
+            BuiltInAccountObjectReadResultKind::Explicit(obj) => obj.is_shared(),
+        }
+    }
+
+    pub fn id(&self) -> ObjectId {
+        self.object_id
+    }
+}
+
+impl From<&BuiltInAccountObjectReadResult> for ObjectReadResult {
+    fn from(account_object: &BuiltInAccountObjectReadResult) -> Self {
+        let input_object_kind = if account_object.is_explicit_immutable() {
+            InputObjectKind::ImmOrOwnedMoveObject(
+                account_object
+                    .compute_object_reference()
+                    .expect("should be an explicit immutable account object"),
+            )
+        } else {
+            let initial_shared_version = account_object
+                .initial_shared_version()
+                .expect("should be an explicit shared or implicit account object");
+            InputObjectKind::SharedMoveObject {
+                id: account_object.id(),
+                initial_shared_version,
+                mutable: false,
+            }
+        };
+
+        let object_read_result_kind = match &account_object.object {
+            BuiltInAccountObjectReadResultKind::Explicit(obj) => {
+                ObjectReadResultKind::Object(obj.clone())
+            }
+            BuiltInAccountObjectReadResultKind::Implicit => ObjectReadResultKind::Object(
+                Object::new_shared_implicit_account_object(account_object.id()),
+            ),
+        };
+
+        Self::new(input_object_kind, object_read_result_kind)
+    }
+}
+
+impl From<Object> for BuiltInAccountObjectReadResultKind {
+    fn from(object: Object) -> Self {
+        Self::Explicit(object)
+    }
+}
+
+pub struct BuiltInAccountObjects {
+    pub objects: Vec<BuiltInAccountObjectReadResult>,
+}
+
+impl BuiltInAccountObjects {
+    pub fn iter(&self) -> impl Iterator<Item = &BuiltInAccountObjectReadResult> {
+        self.objects.iter()
+    }
+
+    pub fn iter_objects(&self) -> impl Iterator<Item = &Object> {
+        self.objects.iter().filter_map(|o| o.object.as_object())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+}
+
+impl From<Vec<BuiltInAccountObjectReadResult>> for BuiltInAccountObjects {
+    fn from(objects: Vec<BuiltInAccountObjectReadResult>) -> Self {
         Self { objects }
     }
 }

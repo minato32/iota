@@ -545,6 +545,11 @@ struct FeatureFlags {
     // Used to gate genesis creation and epoch-change creation for existing networks.
     #[serde(skip_serializing_if = "is_false")]
     enable_claim_registry: bool,
+
+    // If true, enables implicit Move authentication for EOAs that have an
+    // on-chain IOTAccount with an AuthenticatorFunctionRefV1 attached.
+    #[serde(skip_serializing_if = "is_false")]
+    enable_implicit_move_authentication: bool,
 }
 
 fn is_true(b: &bool) -> bool {
@@ -1825,6 +1830,15 @@ impl ProtocolConfig {
     pub fn enable_claim_registry(&self) -> bool {
         self.feature_flags.enable_claim_registry
     }
+
+    pub fn enable_implicit_move_authentication(&self) -> bool {
+        let enable = self.feature_flags.enable_implicit_move_authentication;
+        assert!(
+            !enable || self.enable_move_authentication(),
+            "enable_implicit_move_authentication requires enable_move_authentication to be set"
+        );
+        enable
+    }
 }
 
 #[cfg(not(msim))]
@@ -2988,6 +3002,9 @@ impl ProtocolConfig {
                         cfg.builtin_move_authenticator_cost_base = Some(0);
                         // Enable claim registry in devnet only.
                         cfg.feature_flags.enable_claim_registry = true;
+                        // Enable implicit Move authentication for EOAs with on-chain
+                        // IOTAccount in devnet.
+                        cfg.feature_flags.enable_implicit_move_authentication = true;
                     }
                 }
                 // Use this template when making changes:
@@ -3104,10 +3121,6 @@ impl ProtocolConfig {
 
     pub fn set_passkey_auth_for_testing(&mut self, val: bool) {
         self.feature_flags.passkey_auth = val
-    }
-
-    pub fn set_enable_claim_registry_for_testing(&mut self, val: bool) {
-        self.feature_flags.enable_claim_registry = val;
     }
 
     pub fn set_disallow_new_modules_in_deps_only_packages_for_testing(&mut self, val: bool) {
@@ -3247,6 +3260,14 @@ impl ProtocolConfig {
 
     pub fn set_enable_builtin_move_authenticators_for_testing(&mut self, val: bool) {
         self.feature_flags.enable_builtin_move_authenticators = val;
+    }
+
+    pub fn set_enable_claim_registry_for_testing(&mut self, val: bool) {
+        self.feature_flags.enable_claim_registry = val;
+    }
+
+    pub fn set_enable_implicit_move_authentication_for_testing(&mut self, val: bool) {
+        self.feature_flags.enable_implicit_move_authentication = val;
     }
 }
 

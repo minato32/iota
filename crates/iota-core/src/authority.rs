@@ -118,6 +118,7 @@ use iota_types::{
         MoveObject, MoveObjectExt, OBJECT_START_VERSION, Object, ObjectRead, PastObjectRead,
         bounded_visitor::BoundedVisitor,
     },
+    signature::GenericSignature,
     storage::{
         BackingPackageStore, BackingStore, ObjectKey, ObjectOrTombstone, ObjectStore, WriteKind,
     },
@@ -862,6 +863,81 @@ pub struct AuthorityState {
     pub traffic_controller: Option<Arc<TrafficController>>,
 }
 
+/// All move authenticators (explicit + implicit) for a transaction, paired with
+/// their input objects and, for implicit ones, the original transaction
+/// signature that was used to derive the synthetic authenticator.
+struct MoveAuthenticatorInputs<'a> {
+    authenticators: Vec<&'a MoveAuthenticator>,
+    inputs: Vec<(InputObjects, ObjectReadResult)>,
+    /// `None` for explicit authenticators, `Some(sig)` for implicit ones.
+    implicit_signatures: Vec<Option<&'a GenericSignature>>,
+}
+
+impl<'a> MoveAuthenticatorInputs<'a> {
+    fn new(
+        authenticators: Vec<&'a MoveAuthenticator>,
+        inputs: Vec<(InputObjects, ObjectReadResult)>,
+        implicit_signatures: Vec<Option<&'a GenericSignature>>,
+    ) -> Self {
+        debug_assert_eq!(
+            authenticators.len(),
+            inputs.len(),
+            "Move authenticators count must match the number of authenticator inputs"
+        );
+        debug_assert_eq!(
+            authenticators.len(),
+            implicit_signatures.len(),
+            "Move authenticators count must match the number of implicit signatures"
+        );
+        Self {
+            authenticators,
+            inputs,
+            implicit_signatures,
+        }
+    }
+
+    fn new_with_explicits(
+        authenticators: Vec<&'a MoveAuthenticator>,
+        inputs: Vec<(InputObjects, ObjectReadResult)>,
+    ) -> Self {
+        let len = inputs.len();
+        Self::new(authenticators, inputs, vec![None; len])
+    }
+
+    fn add_implicit(
+        &mut self,
+        authenticator: &'a MoveAuthenticator,
+        inputs: (InputObjects, ObjectReadResult),
+        signature: &'a GenericSignature,
+    ) {
+        self.authenticators.push(authenticator);
+        self.inputs.push(inputs);
+        self.implicit_signatures.push(Some(signature));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.authenticators.is_empty()
+    }
+
+    /// Borrows all three vecs in lockstep.
+    fn iter(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &'a MoveAuthenticator,
+            &InputObjects,
+            &ObjectReadResult,
+            Option<&'a GenericSignature>,
+        ),
+    > + '_ {
+        self.authenticators
+            .iter()
+            .zip(&self.inputs)
+            .zip(&self.implicit_signatures)
+            .map(|((&auth, (inp, acct)), &sig)| (auth, inp, acct, sig))
+    }
+}
+
 /// The authority state encapsulates all state, drives execution, and ensures
 /// safety.
 ///
@@ -937,16 +1013,41 @@ impl AuthorityState {
         // `MoveAuthenticator`. Loading all objects eagerly means that any invalid
         // reference — missing object, wrong version, inaccessible object — causes a
         // pre-consensus rejection.
-        let (tx_input_objects, tx_receiving_objects, per_authenticator_inputs) =
-            self.read_objects_for_validation(transaction, epoch)?;
+        // For all non-MoveAuthenticator signatures, it tries to read the related
+        // account object.
+        let (
+            tx_input_objects,
+            tx_receiving_objects,
+            tx_built_in_account_objects,
+            per_authenticator_inputs,
+        ) = self.read_objects_for_validation(transaction, protocol_config, epoch)?;
 
-        let move_authenticators = transaction.move_authenticators();
+        // Collect explicit move authenticators and their pre-loaded inputs.
+        let mut auth_inputs = MoveAuthenticatorInputs::new_with_explicits(
+            transaction.move_authenticators(),
+            per_authenticator_inputs,
+        );
+
+        // Build implicit authenticators by matching each built-in account object
+        // to the corresponding (non-MoveAuthenticator) signature.
+        let implicit_authenticators = if protocol_config.enable_implicit_move_authentication()
+            && !tx_built_in_account_objects.is_empty()
+        {
+            Self::build_implicit_authenticators(
+                &tx_built_in_account_objects,
+                transaction.tx_signatures(),
+            )?
+        } else {
+            vec![]
+        };
+        for (ref auth, ref inp, sig) in &implicit_authenticators {
+            auth_inputs.add_implicit(auth, inp.clone(), sig);
+        }
 
         // Check the inputs for signing.
-        // If there are `MoveAuthenticator` signatures, their input objects and the
-        // account objects are also checked and must be provided.
-        // It is also checked if there is enough gas to execute the transaction and its
-        // authenticators.
+        // If there are move authenticators (explicit or implicit), their input
+        // objects and account objects are also checked. It is also checked if
+        // there is enough gas to execute the transaction and its authenticators.
         let (gas_status, tx_checked_input_objects, per_authenticator_checked_inputs) = self
             .check_transaction_inputs_for_validation(
                 protocol_config,
@@ -954,12 +1055,10 @@ impl AuthorityState {
                 tx_data,
                 tx_input_objects,
                 &tx_receiving_objects,
-                &move_authenticators,
-                per_authenticator_inputs,
+                &auth_inputs,
             )?;
 
-        // Get the input objects for the authenticators, if there are
-        // `MoveAuthenticator`s.
+        // Get the checked input objects for each move authenticator.
         let per_authenticator_checked_input_objects = per_authenticator_checked_inputs
             .iter()
             .map(|i| &i.0)
@@ -980,7 +1079,8 @@ impl AuthorityState {
 
         let (sender_authenticator_function_ref, sponsor_authenticator_function_ref) =
             extract_auth_fun_refs(signer, gas_data.owner, |address| {
-                move_authenticators
+                auth_inputs
+                    .authenticators
                     .iter()
                     .zip(per_authenticator_checked_inputs.iter())
                     .find(|(move_authenticator, _)| {
@@ -995,19 +1095,20 @@ impl AuthorityState {
         // of deferral.
         let pre_consensus_move_authenticators =
             pre_consensus_move_authenticators(transaction, protocol_config);
-        let (move_authenticators, per_authenticator_checked_inputs): (Vec<_>, Vec<_>) =
-            move_authenticators
-                .into_iter()
-                .zip(per_authenticator_checked_inputs)
-                .filter(|(a, _)| pre_consensus_move_authenticators.contains(a))
-                .unzip();
+        let (move_authenticators, per_authenticator_checked_inputs): (Vec<_>, Vec<_>) = auth_inputs
+            .authenticators
+            .iter()
+            .copied()
+            .zip(per_authenticator_checked_inputs)
+            .filter(|(a, _)| pre_consensus_move_authenticators.contains(a))
+            .unzip();
         let per_authenticator_checked_input_objects: Vec<_> = per_authenticator_checked_inputs
             .iter()
             .map(|i| &i.0)
             .collect();
 
-        // If there are `MoveAuthenticator` signatures, execute them and check if they
-        // all succeed.
+        // If there are move authenticators, execute them and check if they all
+        // succeed.
         if !move_authenticators.is_empty() {
             let aggregated_authenticator_input_objects =
                 iota_transaction_checks::aggregate_authenticator_input_objects(
@@ -1328,7 +1429,7 @@ impl AuthorityState {
             return Ok((effects, None));
         }
 
-        let (tx_input_objects, per_authenticator_inputs) =
+        let (tx_input_objects, tx_built_in_account_objects, per_authenticator_inputs) =
             self.read_objects_for_execution(tx_guard.as_lock_guard(), transaction, epoch_store)?;
 
         // If no expected_effects_digest was provided, try to get it from storage.
@@ -1343,6 +1444,7 @@ impl AuthorityState {
             tx_guard,
             transaction,
             tx_input_objects,
+            tx_built_in_account_objects,
             per_authenticator_inputs,
             expected_effects_digest,
             epoch_store,
@@ -1353,29 +1455,50 @@ impl AuthorityState {
         )
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn read_objects_for_execution(
         &self,
         tx_lock: &TxLockGuard,
         transaction: &VerifiedExecutableTransaction,
         epoch_store: &Arc<AuthorityPerEpochStore>,
-    ) -> IotaResult<(InputObjects, Vec<(InputObjects, ObjectReadResult)>)> {
+    ) -> IotaResult<(
+        InputObjects,
+        BuiltInAccountObjects,
+        Vec<(InputObjects, ObjectReadResult)>,
+    )> {
         let _scope = monitored_scope("Execution::load_input_objects");
         let _metrics_guard = self
             .metrics
             .execution_load_input_objects_latency
             .start_timer();
 
+        let protocol_config = epoch_store.protocol_config();
+
         let input_objects = transaction.collect_all_input_object_kind_for_reading()?;
 
-        let input_objects = self.input_loader.read_objects_for_execution(
-            epoch_store,
-            &transaction.key(),
-            tx_lock,
-            &input_objects,
-            epoch_store.epoch(),
-        )?;
+        let built_in_account_objects = if protocol_config.enable_implicit_move_authentication() {
+            transaction.built_in_account_objects()?
+        } else {
+            vec![]
+        };
 
-        transaction.split_input_objects_into_groups_for_reading(input_objects)
+        let (input_objects, built_in_account_objects) =
+            self.input_loader.read_objects_for_execution(
+                epoch_store,
+                &transaction.key(),
+                tx_lock,
+                &input_objects,
+                &built_in_account_objects,
+                epoch_store.epoch(),
+            )?;
+
+        let (input_objects, per_authenticator_inputs) =
+            transaction.split_input_objects_into_groups_for_reading(input_objects)?;
+        Ok((
+            input_objects,
+            built_in_account_objects,
+            per_authenticator_inputs,
+        ))
     }
 
     /// Test only wrapper for `try_execute_immediately()` above, useful for
@@ -1460,6 +1583,7 @@ impl AuthorityState {
         tx_guard: TxGuard,
         transaction: &VerifiedExecutableTransaction,
         tx_input_objects: InputObjects,
+        tx_built_in_account_objects: BuiltInAccountObjects,
         per_authenticator_inputs: Vec<(InputObjects, ObjectReadResult)>,
         expected_effects_digest: Option<TransactionEffectsDigest>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
@@ -1509,6 +1633,7 @@ impl AuthorityState {
             &execution_guard,
             transaction,
             tx_input_objects,
+            tx_built_in_account_objects,
             per_authenticator_inputs,
             epoch_store,
         ) {
@@ -1711,6 +1836,7 @@ impl AuthorityState {
         _execution_guard: &ExecutionLockReadGuard<'_>,
         transaction: &VerifiedExecutableTransaction,
         tx_input_objects: InputObjects,
+        tx_built_in_account_objects: BuiltInAccountObjects,
         per_authenticator_inputs: Vec<(InputObjects, ObjectReadResult)>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> IotaResult<(
@@ -1743,12 +1869,30 @@ impl AuthorityState {
 
         let (kind, signer, gas_data) = tx_data.execution_parts();
 
-        let move_authenticators = transaction.move_authenticators();
+        // Collect explicit move authenticators and their pre-loaded inputs.
+        let mut auth_inputs = MoveAuthenticatorInputs::new_with_explicits(
+            transaction.move_authenticators(),
+            per_authenticator_inputs,
+        );
+
+        // Build implicit authenticators by matching each built-in account object
+        // to the corresponding (non-MoveAuthenticator) signature.
+        let implicit_authenticators = if protocol_config.enable_implicit_move_authentication()
+            && !tx_built_in_account_objects.is_empty()
+        {
+            Self::build_implicit_authenticators(
+                &tx_built_in_account_objects,
+                transaction.data().tx_signatures(),
+            )?
+        } else {
+            vec![]
+        };
+        for (ref auth, ref inp, sig) in &implicit_authenticators {
+            auth_inputs.add_implicit(auth, inp.clone(), sig);
+        }
 
         #[cfg_attr(not(any(msim, fail_points)), expect(unused_mut))]
-        let (inner_temp_store, _, mut effects, execution_error_opt) = if move_authenticators
-            .is_empty()
-        {
+        let (inner_temp_store, _, mut effects, execution_error_opt) = if auth_inputs.is_empty() {
             // No Move authentication required, proceed to execute the transaction directly.
 
             // The cost of partially re-auditing a transaction before execution is
@@ -1784,22 +1928,18 @@ impl AuthorityState {
                 &mut None,
             )
         } else {
-            // One or more `MoveAuthenticator` signatures present — authenticate each and
-            // then execute the transaction.
-            // It is supposed that `MoveAuthenticator` availability is checked in
-            // `SenderSignedData::validity_check`.
+            // One or more move authenticators present — authenticate each and then
+            // execute the transaction.
 
-            debug_assert_eq!(
-                move_authenticators.len(),
-                per_authenticator_inputs.len(),
-                "Move authenticators amount must match the number of authenticator inputs"
-            );
-
-            let per_authenticator_inputs = move_authenticators
+            let per_authenticator_inputs = auth_inputs
                 .iter()
-                .zip(per_authenticator_inputs)
                 .map(
-                    |(move_authenticator, (authenticator_input_objects, account_object))| {
+                    |(
+                        move_authenticator,
+                        authenticator_input_objects,
+                        account_object,
+                        implicit_sig,
+                    )| {
                         // Check basic `object_to_authenticate` preconditions and get its
                         // components.
                         let (
@@ -1816,10 +1956,11 @@ impl AuthorityState {
                             auth_account_object_digest,
                             account_object,
                             &signer,
+                            implicit_sig,
                         )?;
 
                         Ok((
-                            authenticator_input_objects,
+                            authenticator_input_objects.clone(),
                             authenticator_function_ref_for_execution,
                         ))
                     },
@@ -1857,12 +1998,13 @@ impl AuthorityState {
             )?;
 
             debug_assert_eq!(
-                move_authenticators.len(),
+                auth_inputs.authenticators.len(),
                 per_authenticator_checked_input_objects.len(),
                 "Move authenticators amount must match the number of checked authenticator inputs"
             );
 
-            let move_authenticators = move_authenticators
+            let move_authenticators = auth_inputs
+                .authenticators
                 .into_iter()
                 .zip(per_authenticator_inputs)
                 .zip(per_authenticator_checked_input_objects)
@@ -1957,6 +2099,7 @@ impl AuthorityState {
             &execution_guard,
             transaction,
             input_objects,
+            vec![].into(),
             vec![],
             epoch_store,
         )
@@ -2035,11 +2178,12 @@ impl AuthorityState {
             self.get_backing_package_store().as_ref(),
         )?;
 
-        let (input_objects, receiving_objects) = self.input_loader.read_objects_for_signing(
+        let (input_objects, receiving_objects, _) = self.input_loader.read_objects_for_signing(
             // We don't want to cache this transaction since it's a dry run.
             None,
             &input_object_kinds,
             &receiving_object_refs,
+            &[], // TODO
             epoch_store.epoch(),
         )?;
 
@@ -2239,13 +2383,15 @@ impl AuthorityState {
         )?;
 
         // Load input and receiving objects
-        let (mut input_objects, receiving_objects) = self.input_loader.read_objects_for_signing(
-            // We don't want to cache this transaction since it's a simulation.
-            None,
-            &input_object_kinds,
-            &receiving_object_refs,
-            epoch_store.epoch(),
-        )?;
+        let (mut input_objects, receiving_objects, _) =
+            self.input_loader.read_objects_for_signing(
+                // We don't want to cache this transaction since it's a simulation.
+                None,
+                &input_object_kinds,
+                &receiving_object_refs,
+                &[], // TODO
+                epoch_store.epoch(),
+            )?;
 
         // Create a mock gas object if one was not provided
         let mock_gas_id = if transaction.gas().is_empty() {
@@ -2423,13 +2569,15 @@ impl AuthorityState {
             self.get_backing_package_store().as_ref(),
         )?;
 
-        let (mut input_objects, receiving_objects) = self.input_loader.read_objects_for_signing(
-            // We don't want to cache this transaction since it's a dev inspect.
-            None,
-            &input_object_kinds,
-            &receiving_object_refs,
-            epoch_store.epoch(),
-        )?;
+        let (mut input_objects, receiving_objects, _) =
+            self.input_loader.read_objects_for_signing(
+                // We don't want to cache this transaction since it's a dev inspect.
+                None,
+                &input_object_kinds,
+                &receiving_object_refs,
+                &[], // TODO
+                epoch_store.epoch(),
+            )?;
 
         let (gas_status, checked_input_objects) = if skip_checks {
             // If we are skipping checks, then we call the check_dev_inspect_input function
@@ -5422,13 +5570,14 @@ impl AuthorityState {
             std::slice::from_ref(&executable_tx),
         )?;
 
-        let (input_objects, _) =
+        let (input_objects, _, _) =
             self.read_objects_for_execution(&tx_lock, &executable_tx, epoch_store)?;
 
         let (temporary_store, effects, _execution_error_opt) = self.execute_transaction(
             &execution_guard,
             &executable_tx,
             input_objects,
+            vec![].into(),
             vec![],
             epoch_store,
         )?;
@@ -5555,16 +5704,19 @@ impl AuthorityState {
         auth_account_object_id: ObjectId,
         auth_account_object_seq_number: Option<SequenceNumber>,
         auth_account_object_digest: Option<ObjectDigest>,
-        account_object: ObjectReadResult,
+        account_object: &ObjectReadResult,
         signer: &Address,
+        _implicit_signature: Option<&GenericSignature>,
     ) -> IotaResult<AuthenticatorFunctionRefForExecution> {
-        let account_object = match account_object.object {
+        // TODO: implement path with _implicit_signature
+
+        let account_object = match &account_object.object {
             ObjectReadResultKind::Object(object) => Ok(object),
             ObjectReadResultKind::DeletedSharedObject(version, digest) => {
                 Err(UserInputError::AccountObjectDeleted {
                     account_id: account_object.id(),
-                    account_version: version,
-                    transaction_digest: digest,
+                    account_version: *version,
+                    transaction_digest: *digest,
                 })
             }
             // It is impossible to check the account object because it is used in a canceled
@@ -5572,7 +5724,7 @@ impl AuthorityState {
             ObjectReadResultKind::CancelledTransactionSharedObject(version) => {
                 Err(UserInputError::AccountObjectInCanceledTransaction {
                     account_id: account_object.id(),
-                    account_version: version,
+                    account_version: *version,
                 })
             }
         }?;
@@ -5722,22 +5874,113 @@ impl AuthorityState {
         }
     }
 
+    /// For each built-in account object, finds the matching
+    /// non-MoveAuthenticator signature (by signer address == object ID) and
+    /// builds a synthetic [`MoveAuthenticator`] for it.
+    #[allow(clippy::type_complexity)]
+    fn build_implicit_authenticators<'a>(
+        tx_built_in_account_objects: &BuiltInAccountObjects,
+        tx_signatures: &'a [GenericSignature],
+    ) -> IotaResult<
+        Vec<(
+            MoveAuthenticator,
+            (InputObjects, ObjectReadResult),
+            &'a GenericSignature,
+        )>,
+    > {
+        tx_built_in_account_objects
+            .iter()
+            .map(|account_object| {
+                let sig = tx_signatures
+                    .iter()
+                    .filter(|sig| !matches!(sig, GenericSignature::MoveAuthenticator(_)))
+                    .find(|sig| {
+                        Address::try_from(*sig)
+                            .map(|addr| ObjectId::from(addr) == account_object.id())
+                            .unwrap_or(false)
+                    })
+                    .expect("account objects were read from these signatures");
+                let (auth, inputs, account) =
+                    Self::craft_synthetic_authenticator(account_object, sig)?;
+                Ok((auth, (inputs, account), sig))
+            })
+            .collect()
+    }
+
+    /// Builds a synthetic [`MoveAuthenticator`] for implicit account
+    /// authentication.  The original signature is passed as a single
+    /// `CallArg::Pure` argument so the on-chain authenticator function can
+    /// verify it.
+    fn craft_synthetic_authenticator(
+        account_object_read: &BuiltInAccountObjectReadResult,
+        signature: &GenericSignature,
+    ) -> IotaResult<(MoveAuthenticator, InputObjects, ObjectReadResult)> {
+        // Build `object_to_authenticate` based on the account object's ownership.
+        let object_to_authenticate = if account_object_read.is_explicit_immutable() {
+            CallArg::ImmutableOrOwned(
+                account_object_read
+                    .compute_object_reference()
+                    .expect("should be an explicit immutable account object"),
+            )
+        } else {
+            let initial_shared_version = account_object_read
+                .initial_shared_version()
+                .expect("should be an explicit shared or implicit account object");
+            CallArg::Shared(SharedObjectRef {
+                object_id: account_object_read.id(),
+                initial_shared_version,
+                mutable: false,
+            })
+        };
+
+        // Serialize the original signature so the authenticator can inspect it.
+        let sig_bytes: Vec<u8> = bcs::to_bytes(signature).map_err(|e| {
+            IotaError::Unknown(format!(
+                "Failed to serialize signature for implicit authenticator: {e}"
+            ))
+        })?;
+        let call_args = vec![CallArg::Pure(sig_bytes)];
+
+        // Create the syntehtic MoveAuthenticator.
+        let move_authenticator =
+            MoveAuthenticator::new_v1(call_args, vec![], object_to_authenticate);
+
+        // The implicit authenticator has no extra input objects (beyond the account).
+        let authenticator_input_objects = InputObjects::new(vec![]);
+
+        Ok((
+            move_authenticator,
+            authenticator_input_objects,
+            account_object_read.into(),
+        ))
+    }
+
     #[allow(clippy::type_complexity)]
     fn read_objects_for_validation(
         &self,
         transaction: &VerifiedTransaction,
+        protocol_config: &ProtocolConfig,
         epoch: u64,
     ) -> IotaResult<(
         InputObjects,
         ReceivingObjects,
+        BuiltInAccountObjects,
         Vec<(InputObjects, ObjectReadResult)>,
     )> {
-        let (input_objects, tx_receiving_objects) = self.input_loader.read_objects_for_signing(
-            Some(transaction.digest()),
-            &transaction.collect_all_input_object_kind_for_reading()?,
-            &transaction.data().transaction_data().receiving_objects(),
-            epoch,
-        )?;
+        let built_in_account_objects = if protocol_config.enable_implicit_move_authentication() {
+            transaction.built_in_account_objects()?
+        } else {
+            vec![]
+        };
+
+        let (input_objects, tx_receiving_objects, built_in_account_objects) =
+            self.input_loader.read_objects_for_signing(
+                Some(transaction.digest()),
+                &transaction.collect_all_input_object_kind_for_reading()?,
+                &transaction.data().transaction_data().receiving_objects(),
+                &built_in_account_objects,
+                epoch,
+            )?;
 
         transaction
             .split_input_objects_into_groups_for_reading(input_objects)
@@ -5745,6 +5988,7 @@ impl AuthorityState {
                 (
                     tx_input_objects,
                     tx_receiving_objects,
+                    built_in_account_objects,
                     per_authenticator_inputs,
                 )
             })
@@ -5758,14 +6002,13 @@ impl AuthorityState {
         tx_data: &TransactionData,
         tx_input_objects: InputObjects,
         tx_receiving_objects: &ReceivingObjects,
-        move_authenticators: &Vec<&MoveAuthenticator>,
-        per_authenticator_inputs: Vec<(InputObjects, ObjectReadResult)>,
+        auth_inputs: &MoveAuthenticatorInputs<'_>,
     ) -> IotaResult<(
         IotaGasStatus,
         CheckedInputObjects,
         Vec<(CheckedInputObjects, AuthenticatorFunctionRefForSigning)>,
     )> {
-        let authenticator_gas_budget = if move_authenticators.is_empty() {
+        let authenticator_gas_budget = if auth_inputs.is_empty() {
             0
         } else {
             // `max_auth_gas` is used here as a Move authenticator gas budget until it is
@@ -5773,17 +6016,15 @@ impl AuthorityState {
             protocol_config.max_auth_gas()
         };
 
-        debug_assert_eq!(
-            move_authenticators.len(),
-            per_authenticator_inputs.len(),
-            "Move authenticators amount must match the number of authenticator inputs"
-        );
-
-        let per_authenticator_checked_inputs = move_authenticators
+        let per_authenticator_checked_inputs = auth_inputs
             .iter()
-            .zip(per_authenticator_inputs)
             .map(
-                |(move_authenticator, (authenticator_input_objects, account_object))| {
+                |(
+                    move_authenticator,
+                    authenticator_input_objects,
+                    account_object,
+                    implicit_sig,
+                )| {
                     // Check basic `object_to_authenticate` preconditions and get its components.
                     let (
                         auth_account_object_id,
@@ -5801,13 +6042,14 @@ impl AuthorityState {
                             auth_account_object_digest,
                             account_object,
                             &signer,
+                            implicit_sig,
                         )?
                         .into();
 
                     // Check the MoveAuthenticator input objects.
                     let authenticator_checked_input_objects =
                         iota_transaction_checks::check_move_authenticator_input_for_validation(
-                            authenticator_input_objects,
+                            authenticator_input_objects.clone(),
                         )?;
 
                     Ok((
