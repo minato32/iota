@@ -10,7 +10,7 @@ use crate::{
     base_types::{IotaAddress, ObjectRef},
     digests::TransactionDigest,
     signature::GenericSignature,
-    transaction::Transaction,
+    transaction::{SenderSignedData, Transaction},
 };
 
 /// A pre-consensus claim produced by a trusted actor certifying that a specific

@@ -33,7 +33,6 @@ use crate::{
     supported_protocol_versions::{
         Chain, SupportedProtocolVersions, SupportedProtocolVersionsWithHashes,
     },
-    attestation::AttestedTransaction,
     transaction::{CertifiedTransaction, Transaction},
 };
 
