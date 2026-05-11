@@ -516,6 +516,13 @@ pub(crate) fn classify(transaction: &ConsensusTransaction) -> &'static str {
                 "owned_user_transaction_v2"
             }
         }
+        ConsensusTransactionKind::UserTransactionV2(a) => {
+            if a.transaction.contains_shared_object() {
+                "shared_user_transaction"
+            } else {
+                "owned_user_transaction"
+            }
+        }
         ConsensusTransactionKind::CheckpointSignature(_) => "checkpoint_signature",
         ConsensusTransactionKind::EndOfPublish(_) => "end_of_publish",
         ConsensusTransactionKind::CapabilityNotificationV1(_) => "capability_notification_v1",
@@ -721,6 +728,9 @@ impl SequencedConsensusTransaction {
             SequencedConsensusTransactionKind::External(ConsensusTransaction {
                 kind: ConsensusTransactionKind::UserTransactionV1(_)
                     | ConsensusTransactionKind::UserTransactionV2(_),
+                ..
+            }) | SequencedConsensusTransactionKind::External(ConsensusTransaction {
+                kind: ConsensusTransactionKind::UserTransactionV2(_),
                 ..
             })
         )
