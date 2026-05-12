@@ -1017,6 +1017,8 @@ impl AuthorityState {
 
         let owned_objects = tx_checked_input_objects.inner().filter_owned_objects();
 
+        let owned_objects = tx_checked_input_objects.inner().filter_owned_objects();
+
         let epoch_id = epoch_store.epoch_start_config().epoch_data().epoch_id();
         let epoch_start_timestamp = epoch_store
             .epoch_start_config()
