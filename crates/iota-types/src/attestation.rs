@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use crate::{
         base_types::{IotaAddress, random_object_ref},
-        crypto::{Ed25519IotaSignature, IotaSignature},
+        crypto::Ed25519IotaSignature,
         utils::create_fake_transaction,
     };
 
@@ -202,11 +202,7 @@ mod tests {
         };
         let encoded = bcs::to_bytes(&attestation).unwrap();
         let decoded: Attestation = bcs::from_bytes(&encoded).unwrap();
-        let Attestation::Validator {
-            attestor_index,
-            ..
-        } = decoded
-        else {
+        let Attestation::Validator { attestor_index, .. } = decoded else {
             panic!("unexpected variant");
         };
         assert_eq!(attestor_index, AuthorityIndex::new_for_test(3));
@@ -218,7 +214,9 @@ mod tests {
         let attestation = Attestation::Explicit {
             payload: make_attestation_data(),
             attestor_address: address,
-            signature: GenericSignature::Signature(Ed25519IotaSignature::default().into()),
+            signature: Box::new(GenericSignature::Signature(
+                Ed25519IotaSignature::default().into(),
+            )),
         };
         let encoded = bcs::to_bytes(&attestation).unwrap();
         let decoded: Attestation = bcs::from_bytes(&encoded).unwrap();
