@@ -16,7 +16,7 @@
 //! and skips expensive validation for transactions that can't acquire object
 //! locks anyway.
 //!
-//! # Per-transaction order within the loop 
+//! # Per-transaction order within the loop
 //!
 //! - Non-user transaction — pass through unchanged.
 //! - Check #0: Dedup by `ConsensusTransactionKey` — silent drop.
