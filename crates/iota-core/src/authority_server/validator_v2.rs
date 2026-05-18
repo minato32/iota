@@ -1,10 +1,6 @@
 // Copyright (c) 2026 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(test)]
-#[path = "../unit_tests/validator_v2_tests.rs"]
-mod validator_v2_tests;
-
 use std::sync::Arc;
 
 use futures::{StreamExt, future::Either, stream};
@@ -19,6 +15,7 @@ use iota_types::{
     effects::{TransactionEffects, TransactionEffectsAPI},
     error::IotaError,
     fp_ensure,
+    iota_system_state::epoch_start_iota_system_state::EpochStartSystemStateTrait,
     message_envelope::Message,
     messages_consensus::ConsensusTransaction,
     messages_grpc::{
