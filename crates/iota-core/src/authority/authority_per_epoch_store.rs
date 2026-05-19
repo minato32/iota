@@ -4625,7 +4625,7 @@ impl AuthorityPerEpochStore {
                             );
 
                             ConsensusTransactionResult::Cancelled((
-                                verified_executable_tx.tx,
+                                verified_executable_tx,
                                 CancelConsensusTransactionReason::CongestionOnObjects {
                                     congested_objects,
                                     suggested_gas_price,
@@ -4646,7 +4646,7 @@ impl AuthorityPerEpochStore {
                     );
 
                     return Ok(ConsensusTransactionResult::Cancelled((
-                        verified_executable_tx.tx,
+                        verified_executable_tx,
                         CancelConsensusTransactionReason::DkgFailed,
                     )));
                 }
@@ -4671,7 +4671,7 @@ impl AuthorityPerEpochStore {
                 }
 
                 Ok(ConsensusTransactionResult::Scheduled {
-                    transaction: verified_executable_tx.tx,
+                    transaction: verified_executable_tx,
                     start_time,
                 })
             }

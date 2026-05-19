@@ -17,7 +17,10 @@ use iota_types::{
     attestation::Attestation,
     base_types::{AuthorityName, TransactionDigest},
     digests::ConsensusCommitDigest,
-    executable_transaction::{TrustedExecutableTransaction, VerifiedExecutableTransaction},
+    executable_transaction::{
+        TrustedExecutableTransaction, VerifiedExecutableAttestedTransaction,
+        VerifiedExecutableTransaction,
+    },
     iota_system_state::epoch_start_iota_system_state::EpochStartSystemStateTrait,
     messages_consensus::{
         CancelledTransaction, ConsensusTransaction, ConsensusTransactionKey,
