@@ -142,6 +142,9 @@ pub const PROTOCOL_VERSION_IIP8: u64 = 20;
 // Version 25: Deprecate zkLogin related parameters since zkLogin is no longer
 //             supported.
 // Version 26: Enable white flag flow and validator attestation in devnet.
+//             Switch per-object congestion-control mode to TotalComputationCost
+//             (uses attested computation cost from UserTransactionV2 for
+//             shared-object scheduling) in devnet.
 #[derive(Copy, Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion(u64);
 

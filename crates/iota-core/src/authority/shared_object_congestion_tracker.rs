@@ -1146,6 +1146,7 @@ mod object_cost_tests {
                 // 3|              |
                 // 4|              |
                 PerObjectCongestionControlMode::TotalTxCount => 2,
+                PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
             },
         );
 
@@ -1426,6 +1427,7 @@ mod object_cost_tests {
             | PerObjectCongestionControlMode::TotalComputationUnits => unreachable!(),
             PerObjectCongestionControlMode::TotalGasBudget => 20,
             PerObjectCongestionControlMode::TotalTxCount => 11,
+            PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
         };
         assert_eq!(
             shared_object_congestion_tracker
@@ -1464,6 +1466,7 @@ mod object_cost_tests {
             | PerObjectCongestionControlMode::TotalComputationUnits => unreachable!(),
             PerObjectCongestionControlMode::TotalGasBudget => 30,
             PerObjectCongestionControlMode::TotalTxCount => 12,
+            PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
         };
         let cert_duration = shared_object_congestion_tracker
             .congestion_control_parameters
@@ -1722,6 +1725,7 @@ mod object_cost_tests {
             | PerObjectCongestionControlMode::TotalComputationUnits => unreachable!(),
             PerObjectCongestionControlMode::TotalGasBudget => 100,
             PerObjectCongestionControlMode::TotalTxCount => 2,
+            PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
         };
 
         let max_overshoot_per_commit = match mode {
@@ -1729,6 +1733,7 @@ mod object_cost_tests {
             | PerObjectCongestionControlMode::TotalComputationUnits => unreachable!(),
             PerObjectCongestionControlMode::TotalGasBudget => 200,
             PerObjectCongestionControlMode::TotalTxCount => 2,
+            PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
         };
 
         let congestion_control_parameters = CongestionControlParameters::new_for_test(
@@ -1863,6 +1868,7 @@ mod object_cost_tests {
             | PerObjectCongestionControlMode::TotalComputationUnits => unreachable!(),
             PerObjectCongestionControlMode::TotalGasBudget => 90,
             PerObjectCongestionControlMode::TotalTxCount => 2,
+            PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
         };
 
         let initial_object_debt = match mode {
@@ -1870,6 +1876,7 @@ mod object_cost_tests {
             | PerObjectCongestionControlMode::TotalComputationUnits => unreachable!(),
             PerObjectCongestionControlMode::TotalGasBudget => 70,
             PerObjectCongestionControlMode::TotalTxCount => 2,
+            PerObjectCongestionControlMode::TotalComputationCost => unimplemented!(),
         };
 
         let mut shared_object_congestion_tracker = SharedObjectCongestionTracker::new(

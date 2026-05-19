@@ -42,7 +42,8 @@ use iota_types::{
     effects::TransactionEffects,
     error::{IotaError, IotaResult},
     executable_transaction::{
-        CertificateProof, ExecutableTransaction, VerifiedExecutableTransaction,
+        CertificateProof, ExecutableTransaction, VerifiedExecutableAttestedTransaction,
+        VerifiedExecutableTransaction,
     },
     global_state_hash::GlobalStateHash,
     iota_system_state::epoch_start_iota_system_state::{
@@ -4142,6 +4143,7 @@ impl AuthorityPerEpochStore {
             certificate_author,
             consensus_index: _,
             transaction,
+            attestation,
         }) = transaction;
         let tracking_id = transaction.get_tracking_id();
 
@@ -4623,7 +4625,7 @@ impl AuthorityPerEpochStore {
                             );
 
                             ConsensusTransactionResult::Cancelled((
-                                verified_executable_tx,
+                                verified_executable_tx.tx,
                                 CancelConsensusTransactionReason::CongestionOnObjects {
                                     congested_objects,
                                     suggested_gas_price,
@@ -4644,7 +4646,7 @@ impl AuthorityPerEpochStore {
                     );
 
                     return Ok(ConsensusTransactionResult::Cancelled((
-                        verified_executable_tx,
+                        verified_executable_tx.tx,
                         CancelConsensusTransactionReason::DkgFailed,
                     )));
                 }
@@ -4669,7 +4671,7 @@ impl AuthorityPerEpochStore {
                 }
 
                 Ok(ConsensusTransactionResult::Scheduled {
-                    transaction: verified_executable_tx,
+                    transaction: verified_executable_tx.tx,
                     start_time,
                 })
             }
