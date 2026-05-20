@@ -19,7 +19,9 @@ use iota_types::{
     committee::EpochId,
     digests::TransactionEffectsDigest,
     error::{IotaError, IotaResult},
-    executable_transaction::{VerifiedExecutableAttestedTransaction, VerifiedExecutableTransaction},
+    executable_transaction::{
+        VerifiedExecutableAttestedTransaction, VerifiedExecutableTransaction,
+    },
     fp_bail, fp_ensure,
     message_envelope::Message,
     storage::InputKey,
