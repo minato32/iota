@@ -14,7 +14,6 @@ use iota_common::{fatal, random_util::randomize_cache_capacity_in_tests};
 use iota_config::node::AuthorityOverloadConfig;
 use iota_metrics::monitored_scope;
 use iota_types::{
-    attestation::Attestation,
     base_types::{ObjectID, SequenceNumber, TransactionDigest},
     committee::EpochId,
     digests::TransactionEffectsDigest,
@@ -146,11 +145,6 @@ pub struct PendingCertificate {
     pub waiting_input_objects: BTreeSet<InputKey>,
     // Stores stats about this transaction.
     pub stats: PendingCertificateStats,
-    // Pre-consensus attestation, when the transaction was sequenced as
-    // `UserTransactionV2`. Used at execution time to emit comparison metrics
-    // (attested vs actual computation cost) and, in the future, for
-    // attestor reward/penalty accounting at checkpoint time.
-    pub attestation: Option<Attestation>,
 }
 
 struct CacheInner {
@@ -484,7 +478,6 @@ impl TransactionManager {
         certs: Vec<(
             VerifiedExecutableAttestedTransaction,
             Option<TransactionEffectsDigest>,
-            Option<Attestation>,
         )>,
         epoch_store: &AuthorityPerEpochStore,
     ) {
@@ -496,7 +489,7 @@ impl TransactionManager {
 
             certs
                 .into_iter()
-                .filter(|(cert, _, _)| {
+                .filter(|(cert, _)| {
                     tracing::trace!(tx_digest = ?cert.digest(), "checking if already executed");
 
                     let digest = *cert.digest();
@@ -527,7 +520,7 @@ impl TransactionManager {
 
             certs
                 .into_iter()
-                .filter_map(|(cert, fx_digest, attestation)| {
+                .filter_map(|(cert, fx_digest)| {
                     // Check availability of all transaction associated input objects(transaction +
                     // authenticators).
                     let input_object_kinds =
@@ -578,7 +571,7 @@ impl TransactionManager {
                         }
                     }
 
-                    Some((cert, fx_digest, attestation, input_object_keys))
+                    Some((cert, fx_digest, input_object_keys))
                 })
                 .collect()
         };
@@ -660,7 +653,7 @@ impl TransactionManager {
         let mut pending = Vec::new();
         let pending_cert_enqueue_time = Instant::now();
 
-        for (cert, expected_effects_digest, attestation, input_object_keys) in certs {
+        for (cert, expected_effects_digest, input_object_keys) in certs {
             pending.push(PendingCertificate {
                 certificate: cert,
                 expected_effects_digest,
@@ -670,7 +663,6 @@ impl TransactionManager {
                     enqueue_time: pending_cert_enqueue_time,
                     ready_time: None,
                 },
-                attestation,
             });
         }
 
