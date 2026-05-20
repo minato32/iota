@@ -4143,7 +4143,6 @@ impl AuthorityPerEpochStore {
             certificate_author,
             consensus_index: _,
             transaction,
-            attestation,
         }) = transaction;
         let tracking_id = transaction.get_tracking_id();
 
