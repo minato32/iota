@@ -80,7 +80,7 @@ use iota_types::{
     },
     error::{ExecutionError, IotaError, IotaResult, UserInputError},
     event::{Event, EventID, SystemEpochInfoEvent},
-    executable_transaction::VerifiedExecutableTransaction,
+    executable_transaction::{VerifiedExecutableAttestedTransaction, VerifiedExecutableTransaction},
     execution_config_utils::to_binary_config,
     execution_status::ExecutionStatus,
     fp_ensure,
@@ -1848,6 +1848,18 @@ impl AuthorityState {
                     reference_gas_price,
                 )?;
 
+            // Re-run the sender-side coin deny list check from signing time
+            // for attested transactions only.
+            if certificate.attestation.is_some() {
+                check_coin_deny_list_v1(
+                    tx_data.sender(),
+                    &tx_checked_input_objects,
+                    &ReceivingObjects { objects: vec![] },
+                    &vec![],
+                    &self.get_object_store(),
+                )?;
+            }
+
             let owned_object_refs = tx_checked_input_objects.inner().filter_owned_objects();
             self.check_owned_locks(&owned_object_refs)?;
             epoch_store.executor().execute_transaction_to_effects(
@@ -1939,6 +1951,18 @@ impl AuthorityState {
                 protocol_config,
                 reference_gas_price,
             )?;
+
+            // Re-run the sender-side coin deny list check from signing time
+            // for attested transactions only.
+            if certificate.attestation.is_some() {
+                check_coin_deny_list_v1(
+                    tx_data.sender(),
+                    &authenticator_and_tx_checked_input_objects,
+                    &ReceivingObjects { objects: vec![] },
+                    &vec![],
+                    &self.get_object_store(),
+                )?;
+            }
 
             debug_assert_eq!(
                 move_authenticators.len(),
