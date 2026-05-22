@@ -521,9 +521,9 @@ pub(crate) fn classify(transaction: &ConsensusTransaction) -> &'static str {
         }
         ConsensusTransactionKind::UserTransactionV2(a) => {
             if a.transaction.contains_shared_object() {
-                "shared_user_transaction"
+                "shared_user_transaction_v2"
             } else {
-                "owned_user_transaction"
+                "owned_user_transaction_v2"
             }
         }
         ConsensusTransactionKind::CheckpointSignature(_) => "checkpoint_signature",
