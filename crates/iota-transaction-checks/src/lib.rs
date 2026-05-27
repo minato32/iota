@@ -286,11 +286,9 @@ mod checked {
         ))
     }
 
-    /// Variant of [`check_certificate_and_move_authenticator_input`] for use
-    /// before consensus (attestation path), where a full
-    /// [`VerifiedExecutableTransaction`] is not yet available. Produces an
-    /// execution-mode gas status (full `transaction_gas_budget`, not the
-    /// reduced signing-time auth budget).
+    /// Checks transaction and Move-authenticator inputs, returning an
+    /// execution-mode gas status plus the checked input objects.
+    #[instrument(level = "trace", skip_all)]
     pub fn check_transaction_and_move_authenticator_input(
         transaction: &TransactionData,
         tx_input_objects: InputObjects,
@@ -299,10 +297,12 @@ mod checked {
         protocol_config: &ProtocolConfig,
         reference_gas_price: u64,
     ) -> IotaResult<(IotaGasStatus, Vec<CheckedInputObjects>, CheckedInputObjects)> {
+        // Check Move authenticator inputs first.
         per_authenticator_input_objects
             .iter()
             .try_for_each(check_move_authenticator_objects)?;
 
+        // Check transaction inputs next.
         let gas_status = check_transaction_input_inner(
             protocol_config,
             reference_gas_price,
@@ -318,6 +318,7 @@ mod checked {
             .map(|objects| objects.into_checked())
             .collect::<Vec<_>>();
 
+        // Create a checked union of input objects.
         let mut input_objects_union = tx_input_objects.into_checked();
         for objects in per_authenticator_checked_input_objects.iter() {
             input_objects_union = checked_input_objects_union(input_objects_union, objects)?;
