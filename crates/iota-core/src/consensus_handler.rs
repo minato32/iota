@@ -732,9 +732,6 @@ impl SequencedConsensusTransaction {
                 kind: ConsensusTransactionKind::UserTransactionV1(_)
                     | ConsensusTransactionKind::UserTransactionV2(_),
                 ..
-            }) | SequencedConsensusTransactionKind::External(ConsensusTransaction {
-                kind: ConsensusTransactionKind::UserTransactionV2(_),
-                ..
             })
         )
     }
