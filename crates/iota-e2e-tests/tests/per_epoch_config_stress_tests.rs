@@ -4,14 +4,22 @@
 
 use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
 
+use iota_common::fatal;
 use iota_json_rpc_types::IotaTransactionBlockEffectsAPI;
 use iota_macros::sim_test;
 use iota_types::{
+    attestation::{Attestation, AttestationData},
     base_types::{EpochId, Identifier, IotaAddress, ObjectID, ObjectRef, SequenceNumber, TypeTag},
+    deny_list_v1::{check_address_denied_by_config, get_per_type_coin_deny_list_v1},
+    error::{IotaError, UserInputError},
+    executable_transaction::{
+        VerifiedExecutableAttestedTransaction, VerifiedExecutableTransaction,
+    },
     programmable_transaction_builder::ProgrammableTransactionBuilder,
-    transaction::{CallArg, SharedObjectRef, TransactionData},
+    transaction::{CallArg, SharedObjectRef, TransactionData, VerifiedCertificate},
 };
 use rand::random;
+use starfish_config::AuthorityIndex;
 use test_cluster::{TestCluster, TestClusterBuilder};
 use tracing::info;
 
@@ -234,11 +242,15 @@ impl TestEnv {
 }
 
 async fn create_test_env() -> TestEnv {
-    let test_cluster = TestClusterBuilder::new()
-        .with_epoch_duration_ms(1000)
-        .with_num_validators(5)
-        .build()
-        .await;
+    create_test_env_with_epoch_duration(Some(1000)).await
+}
+
+async fn create_test_env_with_epoch_duration(epoch_duration_ms: Option<u64>) -> TestEnv {
+    let mut builder = TestClusterBuilder::new().with_num_validators(5);
+    if let Some(ms) = epoch_duration_ms {
+        builder = builder.with_epoch_duration_ms(ms);
+    }
+    let test_cluster = builder.build().await;
     let deny_list_object_init_version = test_cluster
         .get_object_from_fullnode_store(&ObjectID::DENY_LIST)
         .await
@@ -284,4 +296,180 @@ async fn create_test_env() -> TestEnv {
         deny_cap_id: deny_cap.unwrap(),
         deny_list_object_init_version,
     }
+}
+
+/// Reproduces the validator-attestation deny-list execution crash from PR
+/// #11574.
+///
+/// `prepare_certificate` re-runs the sender-side coin deny-list check for any
+/// *attested* transaction and propagates a failure as `Err` out of
+/// `try_execute_immediately`. The execution driver (`execution_driver.rs`)
+/// turns any such `Err` (other than `ValidatorHaltedAtEpochEnd`) into `fatal!`
+/// — a node panic.
+///
+/// The input deny-list check reads with `cur_epoch = None`, so a
+/// `deny_list_v1_add` takes effect IMMEDIATELY, within the same epoch. A
+/// transfer that was attested/certified *before* the sender was denied
+/// therefore fails this re-check at execution time, crashing every honest
+/// validator deterministically.
+///
+/// This test certifies the transfer while the sender is allowed, denies the
+/// sender, then executes the attested certificate on a real validator
+/// `AuthorityState`. The resulting `Err` is fed through the exact
+/// `execution_driver.rs` match, so `fatal!` fires and the test panics.
+#[sim_test]
+async fn attested_tx_denylisted_between_attestation_and_execution_crashes_validator() {
+    // Use a long (default) epoch so the certificate's epoch does not advance
+    // between certifying and executing it (a 1s epoch yields `WrongEpoch`).
+    let test_env = create_test_env_with_epoch_duration(None).await;
+    let owner = test_env.regulated_coin_owner;
+
+    // Two gas coins: one funds the transfer cert, one funds the deny-list add.
+    let gas_objs = test_env
+        .test_cluster
+        .wallet
+        .get_all_gas_objects_owned_by_address(owner)
+        .await
+        .unwrap();
+    let gas_for_transfer = gas_objs[0];
+    let gas_for_deny = gas_objs[1];
+
+    // 1) Certify a transfer of the regulated coin WHILE THE SENDER IS NOT YET
+    //    DENIED. Stands in for the attestor's pre-consensus dry-run + signing: it
+    //    passes because the deny-list check currently allows it.
+    //    `create_certificate` gathers a quorum of signatures but does NOT execute
+    //    the transaction.
+    let transfer_data = test_env
+        .test_cluster
+        .test_transaction_builder_with_gas_object(owner, gas_for_transfer)
+        .await
+        .move_call(
+            ObjectID::FRAMEWORK,
+            "pay",
+            "split_and_transfer",
+            vec![
+                CallArg::ImmutableOrOwned(
+                    test_env
+                        .get_latest_object_ref(&test_env.regulated_coin_id)
+                        .await,
+                ),
+                CallArg::pure(&1u64),
+                CallArg::pure(&IotaAddress::ZERO),
+            ],
+        )
+        .with_type_args(vec![test_env.regulated_coin_type.clone()])
+        .build();
+    let transfer_tx = test_env.test_cluster.sign_transaction(&transfer_data);
+    let cert = test_env
+        .test_cluster
+        .create_certificate(transfer_tx, None)
+        .await
+        .unwrap();
+
+    // 2) Now deny the sender. With `None`-epoch reads (used by the input deny-list
+    //    check) this is visible IMMEDIATELY, in the same epoch.
+    let deny_data = test_env
+        .test_cluster
+        .test_transaction_builder_with_gas_object(owner, gas_for_deny)
+        .await
+        .move_call(
+            ObjectID::FRAMEWORK,
+            "coin",
+            "deny_list_v1_add",
+            vec![
+                CallArg::Shared(SharedObjectRef {
+                    object_id: ObjectID::DENY_LIST,
+                    initial_shared_version: test_env.deny_list_object_init_version,
+                    mutable: true,
+                }),
+                CallArg::ImmutableOrOwned(
+                    test_env.get_latest_object_ref(&test_env.deny_cap_id).await,
+                ),
+                CallArg::pure(&owner),
+            ],
+        )
+        .with_type_args(vec![test_env.regulated_coin_type.clone()])
+        .build();
+    let deny_tx = test_env.test_cluster.sign_transaction(&deny_data);
+    test_env
+        .test_cluster
+        .wallet
+        .execute_transaction_must_succeed(deny_tx)
+        .await;
+
+    // 3) Pick a validator and wait until it has observed the denial in its own
+    //    object store, so the execution-time re-check is deterministic.
+    let validator_state = test_env
+        .test_cluster
+        .swarm
+        .validator_node_handles()
+        .into_iter()
+        .next()
+        .unwrap()
+        .with(|node| node.state());
+    let coin_type_str = test_env.regulated_coin_type.to_canonical_string(false);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(cfg) =
+                get_per_type_coin_deny_list_v1(&coin_type_str, &validator_state.get_object_store())
+            {
+                if check_address_denied_by_config(
+                    &cfg,
+                    owner,
+                    &validator_state.get_object_store(),
+                    None,
+                ) {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("validator never observed the denial");
+
+    // 4) Execute the pre-denial certificate as an ATTESTED transaction. The sender
+    //    is now denied → the deny-list re-check inside `prepare_certificate`
+    //    returns `Err(AddressDeniedForCoin)`.
+    let executable = VerifiedExecutableTransaction::new_from_certificate(
+        VerifiedCertificate::new_unchecked(cert),
+    );
+    let attestation = Attestation::Validator {
+        payload: AttestationData::V1 {
+            estimated_computation_cost: 1_000_000,
+            object_versions: vec![],
+        },
+        attestor_index: AuthorityIndex::new_for_test(0),
+    };
+    let attested = VerifiedExecutableAttestedTransaction::new(executable, Some(attestation));
+    let epoch_store = validator_state.epoch_store_for_testing();
+    let result = validator_state.try_execute_immediately(&attested, None, &epoch_store);
+
+    // Confirm it is exactly the deny-list rejection, not an unrelated error.
+    assert!(
+        matches!(
+            &result,
+            Err(IotaError::UserInput {
+                error: UserInputError::AddressDeniedForCoin { .. }
+            })
+        ),
+        "expected AddressDeniedForCoin, got {result:?}",
+    );
+
+    // 5) Feed that real `Err` through the EXACT match from `execution_driver.rs`.
+    //    `fatal!` is `panic!`, so this reproduces the node crash. The `sim_test`
+    //    macro drops `#[should_panic]`, so we catch the panic explicitly and assert
+    //    it fired (silencing its backtrace, which is expected).
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match result {
+        Err(IotaError::ValidatorHaltedAtEpochEnd) => {}
+        Err(e) => fatal!("Failed to execute certified transaction! error={e}"),
+        _ => {}
+    }));
+    std::panic::set_hook(prev_hook);
+    assert!(
+        crashed.is_err(),
+        "expected the attested deny-listed tx to crash the validator via fatal!, but it did not",
+    );
 }
