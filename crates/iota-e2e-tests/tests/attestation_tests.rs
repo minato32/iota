@@ -31,13 +31,14 @@
 //! `execute_transaction_return_raw_effects`, which internally calls
 //! `authority_aggregator()`.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use fastcrypto::{
     ed25519::Ed25519Signature,
     encoding::{Encoding, Hex},
     traits::Authenticator,
 };
+use iota_common::fatal;
 use iota_core::authority_client::validator_v2::ValidatorV2API;
 use iota_json_rpc_types::ObjectChange;
 use iota_keys::keystore::AccountKeystore;
@@ -45,7 +46,14 @@ use iota_macros::sim_test;
 use iota_test_transaction_builder::publish_package;
 use iota_types::{
     IOTA_FRAMEWORK_PACKAGE_ID,
-    base_types::{Identifier, IotaAddress, ObjectID, ObjectRef},
+    attestation::{Attestation, AttestationData},
+    base_types::{Identifier, IotaAddress, ObjectID, ObjectRef, TypeTag},
+    deny_list_v1::{check_address_denied_by_config, get_per_type_coin_deny_list_v1},
+    error::{IotaError, UserInputError},
+    executable_transaction::{
+        CertificateProof, ExecutableTransaction, VerifiedExecutableAttestedTransaction,
+        VerifiedExecutableTransaction,
+    },
     messages_grpc::TxStatusUpdate,
     move_authenticator::MoveAuthenticator,
     move_package,
@@ -57,7 +65,9 @@ use iota_types::{
         TEST_ONLY_GAS_UNIT_FOR_HEAVY_COMPUTATION_STORAGE, Transaction, TransactionData,
     },
 };
+use starfish_config::AuthorityIndex;
 use test_cluster::{TestCluster, TestClusterBuilder};
+use tokio::time::sleep;
 
 const AA_PACKAGE_PATH: &str = "tests/abstract_account/abstract_account";
 const AA_MODULE_NAME: &str = "abstract_account";
@@ -631,4 +641,285 @@ fn abstract_account_type_tag(aa_package_id: &ObjectID) -> iota_types::base_types
         "{aa_package_id}::{AA_MODULE_NAME}::{AA_ACCOUNT_NAME}"
     ))
     .unwrap()
+}
+
+// --------------------------------------------------
+// --- Deny-list crash on the MoveAuthenticator path -
+// --------------------------------------------------
+
+impl TestEnvironment {
+    /// Publishes `move_test_code` (whose `regulated_coin` module mints a
+    /// `REGULATED_COIN` to the publisher and transfers it the `DenyCap`).
+    /// Returns `(coin_id, deny_cap_id, coin_type)`.
+    async fn publish_regulated_coin(&self) -> (ObjectID, ObjectID, TypeTag) {
+        let path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests/move_test_code"]
+            .iter()
+            .collect();
+        let tx_data = self
+            .test_cluster
+            .test_transaction_builder()
+            .await
+            .publish(path)
+            .build();
+        let tx = self.test_cluster.wallet.sign_transaction(&tx_data);
+        let response = self.test_cluster.execute_transaction(tx).await;
+
+        let mut coin_id = None;
+        let mut coin_type = None;
+        let mut deny_cap_id = None;
+        for change in response
+            .object_changes
+            .as_ref()
+            .expect("object_changes must be populated")
+        {
+            if let ObjectChange::Created { object_id, .. } = change {
+                let object = self
+                    .test_cluster
+                    .get_object_from_fullnode_store(object_id)
+                    .await
+                    .unwrap();
+                if object.is_coin() {
+                    coin_id = Some(*object_id);
+                    coin_type = object.coin_type_opt().cloned();
+                } else if object.type_().map_or(false, |t| t.is_deny_cap_v1()) {
+                    deny_cap_id = Some(*object_id);
+                }
+            }
+        }
+        (coin_id.unwrap(), deny_cap_id.unwrap(), coin_type.unwrap())
+    }
+
+    /// Transfers an owned object to `recipient` via the wallet path.
+    async fn transfer_object_to(&self, object_id: &ObjectID, recipient: IotaAddress) {
+        let object_ref = self.test_cluster.get_latest_object_ref(object_id).await;
+        let tx_data = self
+            .test_cluster
+            .test_transaction_builder()
+            .await
+            .transfer(object_ref, recipient)
+            .build();
+        let tx = self.test_cluster.wallet.sign_transaction(&tx_data);
+        let response = self.test_cluster.execute_transaction(tx).await;
+        assert!(
+            response.status_ok().unwrap_or(false),
+            "transfer to {recipient} failed: {response:?}"
+        );
+    }
+
+    /// Adds `address` to the deny list for `coin_type` (signed by the wallet
+    /// owner, who holds the `DenyCap`).
+    async fn deny_address_for_coin(
+        &self,
+        address: IotaAddress,
+        deny_cap_id: &ObjectID,
+        coin_type: &TypeTag,
+    ) {
+        let deny_list_init_version = self
+            .test_cluster
+            .get_object_from_fullnode_store(&ObjectID::DENY_LIST)
+            .await
+            .unwrap()
+            .version();
+        let deny_cap_ref = self.test_cluster.get_latest_object_ref(deny_cap_id).await;
+        let tx_data = self
+            .test_cluster
+            .test_transaction_builder()
+            .await
+            .move_call(
+                IOTA_FRAMEWORK_PACKAGE_ID,
+                "coin",
+                "deny_list_v1_add",
+                vec![
+                    CallArg::Shared(SharedObjectRef {
+                        object_id: ObjectID::DENY_LIST,
+                        initial_shared_version: deny_list_init_version,
+                        mutable: true,
+                    }),
+                    CallArg::ImmutableOrOwned(deny_cap_ref),
+                    CallArg::pure(&address),
+                ],
+            )
+            .with_type_args(vec![coin_type.clone()])
+            .build();
+        let tx = self.test_cluster.wallet.sign_transaction(&tx_data);
+        let response = self.test_cluster.execute_transaction(tx).await;
+        assert!(
+            response.status_ok().unwrap_or(false),
+            "deny_list_v1_add failed: {response:?}"
+        );
+    }
+}
+
+/// Same bug as the owned-object case (`per_epoch_config_stress_tests`), but on
+/// the **MoveAuthenticator** branch of `prepare_certificate`
+/// (`authority.rs:1924-1936`).
+///
+/// An attested `UserTransactionV2` that uses a Move authenticator (abstract
+/// account) and a regulated coin is attested while the sender is allowed, but
+/// the sender is added to the deny list before execution. The execution-time
+/// re-check (`check_coin_deny_list_v1?`) then returns `Err`, which the
+/// execution driver turns into `fatal!`.
+///
+/// Unlike the owned-object test, a MoveAuthenticator tx takes the abstract
+/// account as a *shared* input, so it can't be certified + executed by hand the
+/// simple way. Instead we build the V2-style `ConsensusOrdered` executable the
+/// sequencer builds, hand-assign its shared-object versions with the test
+/// helper, then drive `try_execute_immediately` directly on a validator. The
+/// resulting `Err` is fed through the verbatim `execution_driver.rs` match so
+/// `fatal!` fires, caught with `catch_unwind`.
+#[sim_test]
+async fn attested_move_auth_tx_denylisted_at_execution_crashes_validator()
+-> Result<(), anyhow::Error> {
+    telemetry_subscribers::init_for_testing();
+
+    let _env = ProtocolEnvOverride::new(&[
+        ("IOTA_PROTOCOL_CONFIG_OVERRIDE_ENABLE", "1"),
+        (
+            "IOTA_PROTOCOL_CONFIG_FEATURE_FLAGS_OVERRIDE_ENABLE_WHITE_FLAG_FLOW",
+            "true",
+        ),
+        (
+            "IOTA_PROTOCOL_CONFIG_FEATURE_FLAGS_OVERRIDE_ENABLE_VALIDATOR_ATTESTATION",
+            "true",
+        ),
+    ]);
+
+    let mut test_env = TestEnvironment::new().await;
+    test_env
+        .setup_abstract_account(AA_AUTHENTICATE_FN_NAME_ED25519)
+        .await?;
+    let aa_ref = test_env.aa_ref.unwrap();
+    let aa_sender: IotaAddress = aa_ref.object_id.into();
+
+    // Fund the abstract account with gas.
+    let rgp = test_env.test_cluster.get_reference_gas_price().await;
+    let aa_gas = test_env
+        .test_cluster
+        .fund_address_and_return_gas(rgp, Some(20_000_000_000), aa_sender)
+        .await;
+
+    // Publish a regulated coin and move it under the abstract account's address.
+    let (coin_id, deny_cap_id, coin_type) = test_env.publish_regulated_coin().await;
+    test_env.transfer_object_to(&coin_id, aa_sender).await;
+    let coin_ref = test_env.test_cluster.get_latest_object_ref(&coin_id).await;
+
+    // Build a MoveAuthenticator tx (sender = AA) that (a) touches the AA shared
+    // object so it receives a shared-version assignment, and (b) takes the
+    // regulated coin as input so the deny-list check has a coin type to inspect.
+    let pt = {
+        let mut builder = ProgrammableTransactionBuilder::new();
+        let aa_arg = builder.obj(CallArg::Shared(SharedObjectRef {
+            object_id: aa_ref.object_id,
+            initial_shared_version: aa_ref.version,
+            mutable: true,
+        }))?;
+        let key = builder.pure(1_u8)?;
+        let value = builder.pure(2_u8)?;
+        builder.programmable_move_call(
+            test_env.aa_package_id.unwrap(),
+            Identifier::from_static(AA_MODULE_NAME),
+            Identifier::from_static("add_field"),
+            vec![TypeTag::U8, TypeTag::U8],
+            vec![aa_arg, key, value],
+        );
+        let coin_arg = builder.obj(CallArg::ImmutableOrOwned(coin_ref))?;
+        builder.transfer_arg(IotaAddress::ZERO, coin_arg);
+        builder.finish()
+    };
+    let tx_data = test_env.craft_tx_from_pt(pt, aa_gas, aa_sender).await?;
+    let tx_digest = tx_data.digest().into_inner();
+    let signatures = vec![test_env.create_move_authenticator_for_ed25519(&tx_digest)?];
+    let aa_tx = Transaction::from_generic_sig_data(tx_data, signatures);
+
+    // Pick a validator and build the V2-style executable (`ConsensusOrdered`
+    // proof), exactly as the sequencer does for `UserTransactionV2`.
+    let validator_state = test_env
+        .test_cluster
+        .swarm
+        .validator_node_handles()
+        .into_iter()
+        .next()
+        .unwrap()
+        .with(|node| node.state());
+    let epoch_store = validator_state.epoch_store_for_testing();
+    let executable =
+        VerifiedExecutableTransaction::new_unchecked(ExecutableTransaction::new_from_data_and_sig(
+            aa_tx.data().clone(),
+            CertificateProof::ConsensusOrdered(epoch_store.epoch()),
+        ));
+
+    // Assign the shared-object versions the sequencer would assign.
+    epoch_store.assign_shared_object_versions_for_tests(
+        validator_state.get_object_cache_reader().as_ref(),
+        std::slice::from_ref(&executable),
+    )?;
+
+    // Deny the sender AFTER the executable was built — modelling the deny list
+    // changing between attestation and execution. `None`-epoch reads make this
+    // visible immediately, in the same epoch.
+    test_env
+        .deny_address_for_coin(aa_sender, &deny_cap_id, &coin_type)
+        .await;
+
+    // Wait until this validator observes the denial in its own store.
+    let coin_type_str = coin_type.to_canonical_string(false);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(cfg) =
+                get_per_type_coin_deny_list_v1(&coin_type_str, &validator_state.get_object_store())
+            {
+                if check_address_denied_by_config(
+                    &cfg,
+                    aa_sender,
+                    &validator_state.get_object_store(),
+                    None,
+                ) {
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("validator never observed the denial");
+
+    // Execute as an attested tx → MoveAuthenticator branch of
+    // `prepare_certificate` runs the deny-list re-check → `AddressDeniedForCoin`.
+    let attestation = Attestation::Validator {
+        payload: AttestationData::V1 {
+            estimated_computation_cost: 1_000_000,
+            object_versions: vec![],
+        },
+        attestor_index: AuthorityIndex::new_for_test(0),
+    };
+    let attested = VerifiedExecutableAttestedTransaction::new(executable, Some(attestation));
+    let result = validator_state.try_execute_immediately(&attested, None, &epoch_store);
+
+    assert!(
+        matches!(
+            &result,
+            Err(IotaError::UserInput {
+                error: UserInputError::AddressDeniedForCoin { .. }
+            })
+        ),
+        "expected AddressDeniedForCoin from the move-authenticator branch, got {result:?}",
+    );
+
+    // Feed that real `Err` through the EXACT match from `execution_driver.rs`.
+    // `fatal!` is `panic!`, so this reproduces the node crash; catch it
+    // explicitly (silencing the expected backtrace).
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match result {
+        Err(IotaError::ValidatorHaltedAtEpochEnd) => {}
+        Err(e) => fatal!("Failed to execute certified transaction! error={e}"),
+        _ => {}
+    }));
+    std::panic::set_hook(prev_hook);
+    assert!(
+        crashed.is_err(),
+        "expected the attested deny-listed move-authenticator tx to crash the validator via fatal!, but it did not",
+    );
+
+    Ok(())
 }
