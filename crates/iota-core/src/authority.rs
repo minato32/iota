@@ -1849,7 +1849,7 @@ impl AuthorityState {
                 )?;
 
             // Re-run the sender-side coin deny list check.
-            if certificate.attestation.is_some() {
+            if certificate.attestation().is_some() {
                 let tx_receiving_objects = self
                     .input_loader
                     .read_receiving_objects(&tx_data.receiving_objects(), epoch_store.epoch())?;
@@ -1955,7 +1955,7 @@ impl AuthorityState {
             )?;
 
             // Re-run the sender-side coin deny list check.
-            if certificate.attestation.is_some() {
+            if certificate.attestation().is_some() {
                 let tx_receiving_objects = self
                     .input_loader
                     .read_receiving_objects(&tx_data.receiving_objects(), epoch_store.epoch())?;
