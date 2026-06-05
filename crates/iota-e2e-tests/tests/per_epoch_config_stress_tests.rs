@@ -4,7 +4,6 @@
 
 use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
 
-use iota_common::fatal;
 use iota_json_rpc_types::IotaTransactionBlockEffectsAPI;
 use iota_macros::sim_test;
 use iota_types::{
@@ -298,27 +297,24 @@ async fn create_test_env_with_epoch_duration(epoch_duration_ms: Option<u64>) -> 
     }
 }
 
-/// Reproduces the validator-attestation deny-list execution crash from PR
-/// #11574.
+/// Regression guard for PR #11574: the coin deny-list re-check must NOT run on
+/// the execution path.
 ///
-/// `prepare_certificate` re-runs the sender-side coin deny-list check for any
-/// *attested* transaction and propagates a failure as `Err` out of
-/// `try_execute_immediately`. The execution driver (`execution_driver.rs`)
-/// turns any such `Err` (other than `ValidatorHaltedAtEpochEnd`) into `fatal!`
-/// — a node panic.
-///
-/// The input deny-list check reads with `cur_epoch = None`, so a
-/// `deny_list_v1_add` takes effect IMMEDIATELY, within the same epoch. A
-/// transfer that was attested/certified *before* the sender was denied
-/// therefore fails this re-check at execution time, crashing every honest
+/// Originally `prepare_certificate` re-ran the sender-side coin deny-list check
+/// for attested transactions and propagated a failure as `Err` out of
+/// `try_execute_immediately`; the execution driver turned that `Err` (other
+/// than `ValidatorHaltedAtEpochEnd`) into `fatal!`, so an attested tx whose
+/// sender was denied between attestation and execution crashed every honest
 /// validator deterministically.
 ///
-/// This test certifies the transfer while the sender is allowed, denies the
-/// sender, then executes the attested certificate on a real validator
-/// `AuthorityState`. The resulting `Err` is fed through the exact
-/// `execution_driver.rs` match, so `fatal!` fires and the test panics.
+/// The fix moved that check into post-consensus validation, where a denied
+/// attested tx is dropped before it is ever sequenced/executed. This test
+/// certifies a regulated-coin transfer while the sender is allowed, denies the
+/// sender (visible immediately via the `None`-epoch read), then executes the
+/// attested certificate directly on a validator and asserts the execution path
+/// no longer produces `AddressDeniedForCoin` — i.e. it can no longer `fatal!`.
 #[sim_test]
-async fn attested_tx_denylisted_between_attestation_and_execution_crashes_validator() {
+async fn attested_tx_denylisted_at_execution_does_not_crash_validator() {
     // Use a long (default) epoch so the certificate's epoch does not advance
     // between certifying and executing it (a 1s epoch yields `WrongEpoch`).
     let test_env = create_test_env_with_epoch_duration(None).await;
@@ -445,31 +441,20 @@ async fn attested_tx_denylisted_between_attestation_and_execution_crashes_valida
     let epoch_store = validator_state.epoch_store_for_testing();
     let result = validator_state.try_execute_immediately(&attested, None, &epoch_store);
 
-    // Confirm it is exactly the deny-list rejection, not an unrelated error.
+    // REGRESSION GUARD (#11574): the coin deny-list re-check was moved OUT of
+    // the execution path into post-consensus validation, where a denied
+    // attested tx is dropped before it is ever sequenced/executed. Executing
+    // such a tx directly must therefore NO LONGER return `AddressDeniedForCoin`
+    // — which previously propagated as `Err` out of `try_execute_immediately`
+    // and was turned into `fatal!` by the execution driver.
     assert!(
-        matches!(
+        !matches!(
             &result,
             Err(IotaError::UserInput {
                 error: UserInputError::AddressDeniedForCoin { .. }
             })
         ),
-        "expected AddressDeniedForCoin, got {result:?}",
-    );
-
-    // 5) Feed that real `Err` through the EXACT match from `execution_driver.rs`.
-    //    `fatal!` is `panic!`, so this reproduces the node crash. The `sim_test`
-    //    macro drops `#[should_panic]`, so we catch the panic explicitly and assert
-    //    it fired (silencing its backtrace, which is expected).
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match result {
-        Err(IotaError::ValidatorHaltedAtEpochEnd) => {}
-        Err(e) => fatal!("Failed to execute certified transaction! error={e}"),
-        _ => {}
-    }));
-    std::panic::set_hook(prev_hook);
-    assert!(
-        crashed.is_err(),
-        "expected the attested deny-listed tx to crash the validator via fatal!, but it did not",
+        "execution-time deny-list check should be gone (enforcement moved to \
+         post-consensus); got {result:?}",
     );
 }

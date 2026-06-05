@@ -38,7 +38,6 @@ use fastcrypto::{
     encoding::{Encoding, Hex},
     traits::Authenticator,
 };
-use iota_common::fatal;
 use iota_core::authority_client::validator_v2::ValidatorV2API;
 use iota_json_rpc_types::ObjectChange;
 use iota_keys::keystore::AccountKeystore;
@@ -750,25 +749,25 @@ impl TestEnvironment {
     }
 }
 
-/// Same bug as the owned-object case (`per_epoch_config_stress_tests`), but on
-/// the **MoveAuthenticator** branch of `prepare_certificate`
-/// (`authority.rs:1924-1936`).
+/// Regression guard for PR #11574, MoveAuthenticator counterpart of the
+/// owned-object test in `per_epoch_config_stress_tests`.
 ///
-/// An attested `UserTransactionV2` that uses a Move authenticator (abstract
-/// account) and a regulated coin is attested while the sender is allowed, but
-/// the sender is added to the deny list before execution. The execution-time
-/// re-check (`check_coin_deny_list_v1?`) then returns `Err`, which the
-/// execution driver turns into `fatal!`.
+/// Originally the deny-list re-check ran on the MoveAuthenticator branch of
+/// `prepare_certificate` and returned `Err` at execution time, which the
+/// execution driver turned into `fatal!` — crashing the validator when a Move
+/// authenticator (abstract account) tx spending a regulated coin had its sender
+/// denied between attestation and execution. The fix moved the check into
+/// post-consensus validation (the tx is dropped before sequencing).
 ///
-/// Unlike the owned-object test, a MoveAuthenticator tx takes the abstract
-/// account as a *shared* input, so it can't be certified + executed by hand the
-/// simple way. Instead we build the V2-style `ConsensusOrdered` executable the
-/// sequencer builds, hand-assign its shared-object versions with the test
-/// helper, then drive `try_execute_immediately` directly on a validator. The
-/// resulting `Err` is fed through the verbatim `execution_driver.rs` match so
-/// `fatal!` fires, caught with `catch_unwind`.
+/// A MoveAuthenticator tx takes the abstract account as a *shared* input, so it
+/// can't be certified + executed by hand the simple way. We build the V2-style
+/// `ConsensusOrdered` executable the sequencer builds, hand-assign its
+/// shared-object versions with the test helper, then drive
+/// `try_execute_immediately` directly on a validator and assert the execution
+/// path no longer produces `AddressDeniedForCoin` — i.e. it can no longer
+/// `fatal!`.
 #[sim_test]
-async fn attested_move_auth_tx_denylisted_at_execution_crashes_validator()
+async fn attested_move_auth_tx_denylisted_at_execution_does_not_crash_validator()
 -> Result<(), anyhow::Error> {
     telemetry_subscribers::init_for_testing();
 
@@ -895,30 +894,22 @@ async fn attested_move_auth_tx_denylisted_at_execution_crashes_validator()
     let attested = VerifiedExecutableAttestedTransaction::new(executable, Some(attestation));
     let result = validator_state.try_execute_immediately(&attested, None, &epoch_store);
 
+    // REGRESSION GUARD (#11574): the coin deny-list re-check was moved OUT of
+    // the execution path (including the MoveAuthenticator branch) into
+    // post-consensus validation, where a denied attested tx is dropped before
+    // it is ever sequenced/executed. Executing such a tx directly must
+    // therefore NO LONGER return `AddressDeniedForCoin` — which previously
+    // propagated as `Err` out of `try_execute_immediately` and was turned into
+    // `fatal!` by the execution driver.
     assert!(
-        matches!(
+        !matches!(
             &result,
             Err(IotaError::UserInput {
                 error: UserInputError::AddressDeniedForCoin { .. }
             })
         ),
-        "expected AddressDeniedForCoin from the move-authenticator branch, got {result:?}",
-    );
-
-    // Feed that real `Err` through the EXACT match from `execution_driver.rs`.
-    // `fatal!` is `panic!`, so this reproduces the node crash; catch it
-    // explicitly (silencing the expected backtrace).
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match result {
-        Err(IotaError::ValidatorHaltedAtEpochEnd) => {}
-        Err(e) => fatal!("Failed to execute certified transaction! error={e}"),
-        _ => {}
-    }));
-    std::panic::set_hook(prev_hook);
-    assert!(
-        crashed.is_err(),
-        "expected the attested deny-listed move-authenticator tx to crash the validator via fatal!, but it did not",
+        "execution-time deny-list check should be gone (enforcement moved to \
+         post-consensus); got {result:?}",
     );
 
     Ok(())
