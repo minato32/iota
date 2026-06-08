@@ -114,3 +114,6 @@ crates/iota-aws-orchestrator/assets/logs/
 
 # ignore explorer files
 apps/explorer/public/*.wasm
+
+# stress-test attestation and total execution cost mode
+dev-tools/iota-private-network/configs/genesis/benchmark.keystore
