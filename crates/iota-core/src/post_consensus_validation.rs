@@ -200,6 +200,11 @@ pub async fn validate_and_resolve_conflicts(
                             actual: attested_units,
                             maximum: max_attested_units,
                         })
+                    } else if attested_cost > max_attested_cost {
+                        Some(IotaError::AttestationCostAboveBudget {
+                            actual: attested_cost,
+                            ceiling: max_attested_cost,
+                        })
                     } else {
                         None
                     }
