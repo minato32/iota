@@ -1479,3 +1479,126 @@ async fn test_v2_honest_cheap_tx_survives_cost_floor() {
         "digest must surface for soft-lock release",
     );
 }
+
+/// Proves the Check #3 floor is unsound when `gas_rounding_step <
+/// base_tx_cost_fixed`: an honest transaction is wrongly dropped with
+/// `AttestationCostBelowMinimum`.
+///
+/// The floor is safe only because the cheapest honest dry-run bucketizes to
+/// `gas_rounding_step` (everything rounds up to one step), and today that
+/// equals `base_tx_cost_fixed`. Raise the floor above the rounding step — a
+/// reachable protocol-config relationship, since the two are independent knobs
+/// with no coupling — and an honest transfer (which still rounds to
+/// `gas_rounding_step`, because `base_tx_cost_fixed` is not charged into
+/// computation) lands below the floor and is dropped post-consensus,
+/// deterministically across validators.
+///
+/// This is the converse of `test_v2_honest_cheap_tx_survives_cost_floor`, and
+/// the bug is unit-agnostic: it fires the same way whether the attestation
+/// carries gas units or NANOS (the `gas_price` cancels on both sides).
+#[sim_test]
+async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
+    // The broken relationship: floor (2000) ABOVE the rounding step (1000).
+    let _guard = ProtocolConfig::apply_overrides_for_testing(|_, mut config| {
+        config.set_enable_white_flag_flow_for_testing(true);
+        config.set_enable_validator_attestation_for_testing(true);
+        config.set_gas_rounding_step_for_testing(1000);
+        config.set_base_tx_cost_fixed_for_testing(2000);
+        config
+    });
+
+    let (sender, sender_key): (IotaAddress, AccountKeyPair) = get_key_pair();
+    let recipient = get_key_pair::<AccountKeyPair>().0;
+
+    let object_id = ObjectID::random();
+    let gas_id = ObjectID::random();
+
+    let (authority, _) = init_state_with_objects_and_object_basics(vec![
+        Object::with_id_owner_for_testing(object_id, sender),
+        Object::with_id_owner_for_testing(gas_id, sender),
+    ])
+    .await;
+
+    let epoch_store = authority.epoch_store_for_testing();
+    let rgp = authority.reference_gas_price_for_testing().unwrap();
+
+    let object_ref = authority
+        .get_object(&object_id)
+        .await
+        .unwrap()
+        .compute_object_reference();
+    let gas_ref = authority
+        .get_object(&gas_id)
+        .await
+        .unwrap()
+        .compute_object_reference();
+
+    // Confirm the broken relationship is in effect.
+    let base = epoch_store.protocol_config().base_tx_cost_fixed();
+    let step = epoch_store
+        .protocol_config()
+        .gas_rounding_step_as_option()
+        .unwrap();
+    assert!(
+        step < base,
+        "test setup requires gas_rounding_step ({step}) < base_tx_cost_fixed ({base})",
+    );
+
+    // An honest, valid transfer, attested by the REAL attestor (no manufactured
+    // value). Its computation rounds to gas_rounding_step (1000) — below the
+    // inflated floor (2000).
+    let tx =
+        make_transfer_object_transaction(object_ref, gas_ref, sender, &sender_key, recipient, rgp);
+    let digest = *tx.digest();
+    let (attestation_data, _owned) = authority
+        .attest_transaction(
+            &VerifiedTransaction::new_unchecked(tx.clone()),
+            &epoch_store,
+        )
+        .expect("honest attestation should succeed");
+    let AttestationData::V1 {
+        estimated_computation_cost,
+        ..
+    } = attestation_data
+    else {
+        panic!("attestor produced a non-V1 AttestationData");
+    };
+    assert!(
+        estimated_computation_cost < base,
+        "honest cost {estimated_computation_cost} should round below the floor {base}",
+    );
+
+    // Feed the REAL honest attestation through post-consensus validation.
+    let mut transactions = vec![make_user_tx_v2(
+        tx,
+        starfish_config::AuthorityIndex::new_for_test(0),
+        estimated_computation_cost,
+    )];
+    let (dropped, _locks, user_tx_digests) =
+        post_consensus_validation::validate_and_resolve_conflicts(
+            &authority,
+            &epoch_store,
+            &mut transactions,
+        )
+        .await
+        .unwrap();
+
+    // BUG: an honest transaction is dropped as if its attestation under-reported.
+    assert!(
+        transactions.is_empty(),
+        "honest V2 was wrongly dropped by the inflated cost floor"
+    );
+    assert_eq!(dropped.len(), 1, "expected exactly one dropped transaction");
+    match &dropped[0].1 {
+        IotaError::AttestationCostBelowMinimum { actual, minimum } => {
+            assert_eq!(*actual, estimated_computation_cost);
+            assert_eq!(*minimum, base);
+        }
+        other => panic!("expected AttestationCostBelowMinimum, got {:?}", other),
+    }
+    assert_eq!(
+        user_tx_digests,
+        vec![digest],
+        "digest must surface for soft-lock release",
+    );
+}
