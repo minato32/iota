@@ -16,10 +16,7 @@ use iota_metrics::{monitored_mpsc::UnboundedReceiver, monitored_scope, spawn_mon
 use iota_types::{
     base_types::{AuthorityName, TransactionDigest},
     digests::ConsensusCommitDigest,
-    executable_transaction::{
-        TrustedExecutableTransaction, VerifiedExecutableAttestedTransaction,
-        VerifiedExecutableTransaction,
-    },
+    executable_transaction::{TrustedExecutableTransaction, VerifiedExecutableTransaction},
     iota_system_state::epoch_start_iota_system_state::EpochStartSystemStateTrait,
     messages_consensus::{
         CancelledTransaction, ConsensusTransaction, ConsensusTransactionKey,

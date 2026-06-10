@@ -8,7 +8,6 @@ use core::default::Default;
 use fastcrypto::{hash::MultisetHash, traits::KeyPair};
 use iota_types::{
     crypto::{AccountKeyPair, AuthorityKeyPair},
-    executable_transaction::VerifiedExecutableAttestedTransaction,
     messages_consensus::ConsensusTransaction,
     utils::to_sender_signed_transaction,
 };

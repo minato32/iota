@@ -80,9 +80,7 @@ use iota_types::{
     },
     error::{ExecutionError, IotaError, IotaResult, UserInputError},
     event::{Event, EventID, SystemEpochInfoEvent},
-    executable_transaction::{
-        VerifiedExecutableAttestedTransaction, VerifiedExecutableTransaction,
-    },
+    executable_transaction::VerifiedExecutableTransaction,
     execution_config_utils::to_binary_config,
     execution_status::ExecutionStatus,
     fp_ensure,
