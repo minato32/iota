@@ -1363,3 +1363,119 @@ async fn test_v2_cost_out_of_bounds() {
         );
     }
 }
+
+/// Regression guard for the Check #3 cost floor: an honest cheap transaction
+/// must not be dropped by `AttestationCostBelowMinimum`.
+///
+/// `estimated_computation_cost` is bucketed computation in gas *units*
+/// (`computation_cost / gas_price`, authority.rs), and `base_tx_cost_fixed` is
+/// never charged into `computation_units` — it is only a *budget* floor
+/// (gas_v1.rs `check_gas_balance`). The Check #3 floor is nonetheless safe
+/// today only by an uncoupled coincidence: `bucketize_computation` rounds
+/// `computation_units` UP to `gas_rounding_step` (even 0 → one step), and
+/// currently `gas_rounding_step == base_tx_cost_fixed == 1000`, so the cheapest
+/// honest dry-run lands exactly ON the floor and passes the strict `<`.
+///
+/// This guard runs the REAL attestor (`attest_transaction`, nothing
+/// manufactured) on the cheapest honest transaction and asserts it survives. If
+/// a future protocol version sets `gas_rounding_step < base_tx_cost_fixed` (or
+/// raises the floor above the rounding step), cheap and early-abort traffic
+/// would round below the floor and be wrongly dropped post-consensus — this
+/// test would then fail, flagging the regression.
+#[sim_test]
+async fn test_v2_honest_cheap_tx_survives_cost_floor() {
+    let _guard = ProtocolConfig::apply_overrides_for_testing(|_, mut config| {
+        config.set_enable_white_flag_flow_for_testing(true);
+        config.set_enable_validator_attestation_for_testing(true);
+        config
+    });
+
+    let (sender, sender_key): (IotaAddress, AccountKeyPair) = get_key_pair();
+    let recipient = get_key_pair::<AccountKeyPair>().0;
+
+    let object_id = ObjectID::random();
+    let gas_id = ObjectID::random();
+
+    let (authority, _) = init_state_with_objects_and_object_basics(vec![
+        Object::with_id_owner_for_testing(object_id, sender),
+        Object::with_id_owner_for_testing(gas_id, sender),
+    ])
+    .await;
+
+    let epoch_store = authority.epoch_store_for_testing();
+    let rgp = authority.reference_gas_price_for_testing().unwrap();
+
+    let object_ref = authority
+        .get_object(&object_id)
+        .await
+        .unwrap()
+        .compute_object_reference();
+    let gas_ref = authority
+        .get_object(&gas_id)
+        .await
+        .unwrap()
+        .compute_object_reference();
+
+    // An honest, valid, cheap transaction.
+    let tx =
+        make_transfer_object_transaction(object_ref, gas_ref, sender, &sender_key, recipient, rgp);
+    let digest = *tx.digest();
+
+    // Run the REAL attestor (the same dry-run a validator performs) to get the
+    // genuine attested cost — no manufactured value.
+    let verified_tx = VerifiedTransaction::new_unchecked(tx.clone());
+    let (attestation_data, _owned) = authority
+        .attest_transaction(&verified_tx, &epoch_store)
+        .expect("honest attestation should succeed");
+    let AttestationData::V1 {
+        estimated_computation_cost,
+        ..
+    } = attestation_data
+    else {
+        panic!("attestor produced a non-V1 AttestationData");
+    };
+
+    // The safety invariant: the cheapest honest dry-run does not bucketize
+    // below the Check #3 floor. Today this holds exactly (zero margin) because
+    // the gas rounding step equals base_tx_cost_fixed.
+    let base = epoch_store.protocol_config().base_tx_cost_fixed();
+    assert!(
+        estimated_computation_cost >= base,
+        "honest cheap-tx cost {estimated_computation_cost} fell below \
+         base_tx_cost_fixed {base}; the Check #3 floor will wrongly drop honest \
+         traffic — likely gas_rounding_step < base_tx_cost_fixed",
+    );
+
+    // Feed the REAL attestation through post-consensus validation. Author 0
+    // matches the attestor index, so only the cost floor could reject it.
+    let mut transactions = vec![make_user_tx_v2(
+        tx,
+        starfish_config::AuthorityIndex::new_for_test(0),
+        estimated_computation_cost,
+    )];
+
+    let (dropped, _locks, user_tx_digests) =
+        post_consensus_validation::validate_and_resolve_conflicts(
+            &authority,
+            &epoch_store,
+            &mut transactions,
+        )
+        .await
+        .unwrap();
+
+    // The honest transaction survives the cost floor.
+    assert_eq!(
+        transactions.len(),
+        1,
+        "honest V2 must survive Check #3, but it was dropped: {dropped:?}"
+    );
+    assert!(
+        dropped.is_empty(),
+        "honest V2 must not be dropped by the cost floor, got {dropped:?}"
+    );
+    assert_eq!(
+        user_tx_digests,
+        vec![digest],
+        "digest must surface for soft-lock release",
+    );
+}
