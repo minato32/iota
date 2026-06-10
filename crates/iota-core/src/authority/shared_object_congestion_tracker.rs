@@ -1137,8 +1137,7 @@ mod object_cost_tests {
                 // 11|______________|____________ max_execution_duration_per_commit = 12
                 // 12|              |
                 // 13|              |
-                PerObjectCongestionControlMode::TotalGasBudget
-                | PerObjectCongestionControlMode::TotalComputationCost => 9,
+                PerObjectCongestionControlMode::TotalGasBudget => 9,
                 // in TotalTxCount mode, the object execution slots becomes:
                 //    object 0       object 1
                 // 0| xxxxxxxx     | xxxxxxxx
