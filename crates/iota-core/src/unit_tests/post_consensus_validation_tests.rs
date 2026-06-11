@@ -1482,25 +1482,24 @@ async fn test_v2_honest_cheap_tx_survives_cost_floor() {
     );
 }
 
-/// Proves the Check #3 floor is unsound when `gas_rounding_step <
-/// base_tx_cost_fixed`: an honest transaction is wrongly dropped with
-/// `AttestationCostBelowMinimum`.
+/// Guards the `min(base_tx_cost_fixed, gas_rounding_step)` floor: when
+/// `base_tx_cost_fixed > gas_rounding_step`, an honest transaction must still
+/// survive Check #3.
 ///
-/// The floor is safe only because the cheapest honest dry-run bucketizes to
-/// `gas_rounding_step` (everything rounds up to one step), and today that
-/// equals `base_tx_cost_fixed`. Raise the floor above the rounding step — a
-/// reachable protocol-config relationship, since the two are independent knobs
-/// with no coupling — and an honest transfer (which still rounds to
-/// `gas_rounding_step`, because `base_tx_cost_fixed` is not charged into
-/// computation) lands below the floor and is dropped post-consensus,
-/// deterministically across validators.
+/// `base_tx_cost_fixed` and `gas_rounding_step` are independent protocol knobs.
+/// A cheap honest transaction's computation rounds up to one
+/// `gas_rounding_step` (`base_tx_cost_fixed` is not charged into computation),
+/// so the sound floor is `min(gas_rounding_step, base_tx_cost_fixed) *
+/// gas_price`, not `base_tx_cost_fixed * gas_price`. With a `base`-only floor
+/// and `base > step` such a transaction would be wrongly dropped; the `min`
+/// floor keeps it.
 ///
-/// This is the converse of `test_v2_honest_cheap_tx_survives_cost_floor`, and
-/// the bug is unit-agnostic: it fires the same way whether the attestation
-/// carries gas units or NANOS (the `gas_price` cancels on both sides).
+/// Converse of `test_v2_honest_cheap_tx_survives_cost_floor` (the `base ==
+/// step` case). If this regresses (someone reverts to a `base`-only floor), the
+/// honest transaction here is dropped and the test fails.
 #[sim_test]
-async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
-    // The broken relationship: floor (2000) ABOVE the rounding step (1000).
+async fn test_v2_honest_tx_survives_when_floor_exceeds_rounding_step() {
+    // base (2000) ABOVE the rounding step (1000): the min() floor must use step.
     let _guard = ProtocolConfig::apply_overrides_for_testing(|_, mut config| {
         config.set_enable_white_flag_flow_for_testing(true);
         config.set_enable_validator_attestation_for_testing(true);
@@ -1547,8 +1546,8 @@ async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
     );
 
     // An honest, valid transfer, attested by the REAL attestor (no manufactured
-    // value). Its computation rounds to gas_rounding_step (1000 units) and, in
-    // NANOS, lands below the inflated floor (base_tx_cost_fixed * gas price).
+    // value). Its computation rounds to gas_rounding_step (1000 units); in NANOS
+    // that sits at the min(base, step) floor, so Check #3 must keep it.
     let tx =
         make_transfer_object_transaction(object_ref, gas_ref, sender, &sender_key, recipient, rgp);
     let digest = *tx.digest();
@@ -1565,11 +1564,13 @@ async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
     else {
         panic!("attestor produced a non-V1 AttestationData");
     };
-    let floor = base * rgp; // base_tx_cost_fixed (units) * gas price = NANOS floor
+    // Sound floor = min(base, step) * gas price. A base-only floor would be
+    // higher (base > step here) and would wrongly drop this transaction.
+    let floor = base.min(step) * rgp;
     assert!(
-        estimated_computation_cost < floor,
-        "honest cost {estimated_computation_cost} NANOS should be below the \
-         inflated floor {floor} NANOS",
+        estimated_computation_cost >= floor,
+        "honest cost {estimated_computation_cost} NANOS must not be below the \
+         min(base, step) floor {floor} NANOS",
     );
 
     // Feed the REAL honest attestation through post-consensus validation.
@@ -1587,19 +1588,16 @@ async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
         .await
         .unwrap();
 
-    // BUG: an honest transaction is dropped as if its attestation under-reported.
-    assert!(
-        transactions.is_empty(),
-        "honest V2 was wrongly dropped by the inflated cost floor"
+    // The min(base, step) floor keeps the honest transaction.
+    assert_eq!(
+        transactions.len(),
+        1,
+        "honest V2 must survive the floor at base > step, dropped: {dropped:?}"
     );
-    assert_eq!(dropped.len(), 1, "expected exactly one dropped transaction");
-    match &dropped[0].1 {
-        IotaError::AttestationCostBelowMinimum { actual, minimum } => {
-            assert_eq!(*actual, estimated_computation_cost);
-            assert_eq!(*minimum, floor);
-        }
-        other => panic!("expected AttestationCostBelowMinimum, got {:?}", other),
-    }
+    assert!(
+        dropped.is_empty(),
+        "honest V2 must not be dropped by the cost floor, got {dropped:?}"
+    );
     assert_eq!(
         user_tx_digests,
         vec![digest],
