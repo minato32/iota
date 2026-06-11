@@ -1367,14 +1367,15 @@ async fn test_v2_cost_out_of_bounds() {
 /// Regression guard for the Check #3 cost floor: an honest cheap transaction
 /// must not be dropped by `AttestationCostBelowMinimum`.
 ///
-/// `estimated_computation_cost` is bucketed computation in gas *units*
-/// (`computation_cost / gas_price`, authority.rs), and `base_tx_cost_fixed` is
-/// never charged into `computation_units` — it is only a *budget* floor
-/// (gas_v1.rs `check_gas_balance`). The Check #3 floor is nonetheless safe
-/// today only by an uncoupled coincidence: `bucketize_computation` rounds
-/// `computation_units` UP to `gas_rounding_step` (even 0 → one step), and
+/// `estimated_computation_cost` is the raw `computation_cost` in NANOS, and the
+/// Check #3 floor is `base_tx_cost_fixed * gas_price` (also NANOS).
+/// `base_tx_cost_fixed` is never charged into computation — it is only a
+/// *budget* floor (gas_v1.rs `check_gas_balance`). The floor is nonetheless
+/// safe today only by an uncoupled coincidence: `bucketize_computation` rounds
+/// the computation units UP to `gas_rounding_step` (even 0 → one step), and
 /// currently `gas_rounding_step == base_tx_cost_fixed == 1000`, so the cheapest
-/// honest dry-run lands exactly ON the floor and passes the strict `<`.
+/// honest dry-run lands exactly ON the floor (in NANOS) and passes the strict
+/// `<`.
 ///
 /// This guard runs the REAL attestor (`attest_transaction`, nothing
 /// manufactured) on the cheapest honest transaction and asserts it survives. If
@@ -1435,15 +1436,16 @@ async fn test_v2_honest_cheap_tx_survives_cost_floor() {
         panic!("attestor produced a non-V1 AttestationData");
     };
 
-    // The safety invariant: the cheapest honest dry-run does not bucketize
-    // below the Check #3 floor. Today this holds exactly (zero margin) because
-    // the gas rounding step equals base_tx_cost_fixed.
-    let base = epoch_store.protocol_config().base_tx_cost_fixed();
+    // The safety invariant: the cheapest honest dry-run cost is not below the
+    // Check #3 floor. Both are in NANOS now: attested = computation_cost, floor
+    // = base_tx_cost_fixed * gas price. Holds with zero margin today because the
+    // cheapest computation is one gas_rounding_step and step == base.
+    let floor = epoch_store.protocol_config().base_tx_cost_fixed() * rgp;
     assert!(
-        estimated_computation_cost >= base,
-        "honest cheap-tx cost {estimated_computation_cost} fell below \
-         base_tx_cost_fixed {base}; the Check #3 floor will wrongly drop honest \
-         traffic — likely gas_rounding_step < base_tx_cost_fixed",
+        estimated_computation_cost >= floor,
+        "honest cheap-tx cost {estimated_computation_cost} NANOS fell below the \
+         floor {floor} NANOS (base_tx_cost_fixed * gas price); Check #3 will \
+         wrongly drop honest traffic",
     );
 
     // Feed the REAL attestation through post-consensus validation. Author 0
@@ -1545,8 +1547,8 @@ async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
     );
 
     // An honest, valid transfer, attested by the REAL attestor (no manufactured
-    // value). Its computation rounds to gas_rounding_step (1000) — below the
-    // inflated floor (2000).
+    // value). Its computation rounds to gas_rounding_step (1000 units) and, in
+    // NANOS, lands below the inflated floor (base_tx_cost_fixed * gas price).
     let tx =
         make_transfer_object_transaction(object_ref, gas_ref, sender, &sender_key, recipient, rgp);
     let digest = *tx.digest();
@@ -1563,9 +1565,11 @@ async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
     else {
         panic!("attestor produced a non-V1 AttestationData");
     };
+    let floor = base * rgp; // base_tx_cost_fixed (units) * gas price = NANOS floor
     assert!(
-        estimated_computation_cost < base,
-        "honest cost {estimated_computation_cost} should round below the floor {base}",
+        estimated_computation_cost < floor,
+        "honest cost {estimated_computation_cost} NANOS should be below the \
+         inflated floor {floor} NANOS",
     );
 
     // Feed the REAL honest attestation through post-consensus validation.
@@ -1592,7 +1596,7 @@ async fn test_v2_honest_tx_dropped_when_floor_exceeds_rounding_step() {
     match &dropped[0].1 {
         IotaError::AttestationCostBelowMinimum { actual, minimum } => {
             assert_eq!(*actual, estimated_computation_cost);
-            assert_eq!(*minimum, base);
+            assert_eq!(*minimum, floor);
         }
         other => panic!("expected AttestationCostBelowMinimum, got {:?}", other),
     }
