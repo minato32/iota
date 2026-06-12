@@ -109,7 +109,8 @@ impl CommitObserver {
 
         observer
             .recover_and_send_commits(last_processed_commit_index, CommittedSubDagSource::Recover)
-            .await;
+            .await
+            .unwrap_or_else(|e| panic!("Failed to recover commits at startup: {e:?}"));
         observer
     }
 
@@ -118,7 +119,10 @@ impl CommitObserver {
     /// - Recovering linearizer state (transaction ack tracker, traversed
     ///   headers)
     /// - Only re-sends commits that are > last_commit_index (none in this case)
-    pub(crate) async fn reinitialize(&mut self, last_commit_index: CommitIndex) {
+    pub(crate) async fn reinitialize(
+        &mut self,
+        last_commit_index: CommitIndex,
+    ) -> ConsensusResult<()> {
         let now = Instant::now();
 
         // Clear linearizer state
@@ -128,13 +132,14 @@ impl CommitObserver {
         // Reuse existing recovery logic - it won't resend commits since
         // they're all <= last_commit_index
         self.recover_and_send_commits(last_commit_index, CommittedSubDagSource::FastCommitSyncer)
-            .await;
+            .await?;
 
         info!(
             "CommitObserver reinitialized at commit index {}, took {:?}",
             last_commit_index,
             now.elapsed()
         );
+        Ok(())
     }
 
     /// Handles the creation of commits from a set of passed leaders.
@@ -262,11 +267,8 @@ impl CommitObserver {
         &mut self,
         last_processed_commit_index: CommitIndex,
         source: CommittedSubDagSource,
-    ) {
-        let last_commit = self
-            .store
-            .read_last_commit()
-            .expect("Reading the last commit should not fail");
+    ) -> ConsensusResult<()> {
+        let last_commit = self.store.read_last_commit()?;
         let last_commit_index = last_commit
             .as_ref()
             .map(|commit| commit.index())
@@ -277,7 +279,7 @@ impl CommitObserver {
         );
         if last_commit_index == 0 {
             info!("No commits to recover in commit observer");
-            return;
+            return Ok(());
         }
 
         // Phase 1: Resend all solid committed sub-dags that haven't been processed
@@ -291,16 +293,13 @@ impl CommitObserver {
         // Phase 2: Recover linearizer and solidifier state
         // Skip if fast sync is ongoing - block data may not be available and
         // this will be reinitialized by fast commit syncer anyway
-        if self
-            .store
-            .read_fast_sync_ongoing()
-            .unwrap_or_else(|e| panic!("Failed to read from storage: {e:?}"))
-        {
+        if self.store.read_fast_sync_ongoing()? {
             info!("Skipping linearizer/solidifier recovery - fast sync ongoing");
-            return;
+            return Ok(());
         }
         self.recover_linearizer_and_solidifier_state(last_commit_index, source)
             .await;
+        Ok(())
     }
 
     /// Recovers linearizer trackers from recent commits and seeds the
