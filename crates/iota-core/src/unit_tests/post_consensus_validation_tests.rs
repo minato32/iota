@@ -1367,8 +1367,8 @@ async fn test_v2_cost_out_of_bounds() {
 /// Regression guard for the Check #3 cost floor: an honest cheap transaction
 /// must not be dropped by `AttestationCostBelowMinimum`.
 ///
-/// `estimated_computation_cost` is the raw `computation_cost` in NANOS, and the
-/// Check #3 floor is `base_tx_cost_fixed * gas_price` (also NANOS).
+/// `computation_units` is the attested computation in gas units, and the
+/// Check #3 floor is `min(base_tx_cost_fixed, gas_rounding_step)` (also units).
 /// `base_tx_cost_fixed` is never charged into computation — it is only a
 /// *budget* floor (gas_v1.rs `check_gas_balance`). The floor is nonetheless
 /// safe today only by an uncoupled coincidence: `bucketize_computation` rounds
@@ -1429,23 +1429,24 @@ async fn test_v2_honest_cheap_tx_survives_cost_floor() {
         .attest_transaction(&verified_tx, &epoch_store)
         .expect("honest attestation should succeed");
     let AttestationData::V1 {
-        estimated_computation_cost,
-        ..
+        computation_units, ..
     } = attestation_data
     else {
         panic!("attestor produced a non-V1 AttestationData");
     };
 
     // The safety invariant: the cheapest honest dry-run cost is not below the
-    // Check #3 floor. Both are in NANOS now: attested = computation_cost, floor
-    // = base_tx_cost_fixed * gas price. Holds with zero margin today because the
-    // cheapest computation is one gas_rounding_step and step == base.
-    let floor = epoch_store.protocol_config().base_tx_cost_fixed() * rgp;
+    // Check #3 floor, in gas units. The cheapest computation rounds up to one
+    // gas_rounding_step, and the floor is min(base_tx_cost_fixed,
+    // gas_rounding_step), so the honest cost clears it (zero margin today since
+    // step == base).
+    let pc = epoch_store.protocol_config();
+    let floor = pc.base_tx_cost_fixed().min(pc.gas_rounding_step());
     assert!(
-        estimated_computation_cost >= floor,
-        "honest cheap-tx cost {estimated_computation_cost} NANOS fell below the \
-         floor {floor} NANOS (base_tx_cost_fixed * gas price); Check #3 will \
-         wrongly drop honest traffic",
+        computation_units >= floor,
+        "honest cheap-tx cost {computation_units} units fell below the floor \
+         {floor} units (min(base_tx_cost_fixed, gas_rounding_step)); Check #3 \
+         will wrongly drop honest traffic",
     );
 
     // Feed the REAL attestation through post-consensus validation. Author 0
@@ -1453,7 +1454,7 @@ async fn test_v2_honest_cheap_tx_survives_cost_floor() {
     let mut transactions = vec![make_user_tx_v2(
         tx,
         starfish_config::AuthorityIndex::new_for_test(0),
-        estimated_computation_cost,
+        computation_units,
     )];
 
     let (dropped, _locks, user_tx_digests) =
@@ -1546,8 +1547,8 @@ async fn test_v2_honest_tx_survives_when_floor_exceeds_rounding_step() {
     );
 
     // An honest, valid transfer, attested by the REAL attestor (no manufactured
-    // value). Its computation rounds to gas_rounding_step (1000 units); in NANOS
-    // that sits at the min(base, step) floor, so Check #3 must keep it.
+    // value). Its computation rounds to gas_rounding_step (1000 units), which
+    // sits at the min(base, step) floor, so Check #3 must keep it.
     let tx =
         make_transfer_object_transaction(object_ref, gas_ref, sender, &sender_key, recipient, rgp);
     let digest = *tx.digest();
@@ -1558,26 +1559,25 @@ async fn test_v2_honest_tx_survives_when_floor_exceeds_rounding_step() {
         )
         .expect("honest attestation should succeed");
     let AttestationData::V1 {
-        estimated_computation_cost,
-        ..
+        computation_units, ..
     } = attestation_data
     else {
         panic!("attestor produced a non-V1 AttestationData");
     };
-    // Sound floor = min(base, step) * gas price. A base-only floor would be
+    // Sound floor = min(base, step), in gas units. A base-only floor would be
     // higher (base > step here) and would wrongly drop this transaction.
-    let floor = base.min(step) * rgp;
+    let floor = base.min(step);
     assert!(
-        estimated_computation_cost >= floor,
-        "honest cost {estimated_computation_cost} NANOS must not be below the \
-         min(base, step) floor {floor} NANOS",
+        computation_units >= floor,
+        "honest cost {computation_units} units must not be below the \
+         min(base, step) floor {floor} units",
     );
 
     // Feed the REAL honest attestation through post-consensus validation.
     let mut transactions = vec![make_user_tx_v2(
         tx,
         starfish_config::AuthorityIndex::new_for_test(0),
-        estimated_computation_cost,
+        computation_units,
     )];
     let (dropped, _locks, user_tx_digests) =
         post_consensus_validation::validate_and_resolve_conflicts(

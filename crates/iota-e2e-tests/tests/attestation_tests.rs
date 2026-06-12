@@ -38,7 +38,9 @@ use fastcrypto::{
     encoding::{Encoding, Hex},
     traits::Authenticator,
 };
-use iota_core::authority_client::validator_v2::ValidatorV2API;
+use iota_core::{
+    VerifiedExecutableAttestedTransaction, authority_client::validator_v2::ValidatorV2API,
+};
 use iota_json_rpc_types::ObjectChange;
 use iota_keys::keystore::AccountKeystore;
 use iota_macros::sim_test;
@@ -50,8 +52,7 @@ use iota_types::{
     deny_list_v1::{check_address_denied_by_config, get_per_type_coin_deny_list_v1},
     error::{IotaError, UserInputError},
     executable_transaction::{
-        CertificateProof, ExecutableTransaction, VerifiedExecutableAttestedTransaction,
-        VerifiedExecutableTransaction,
+        CertificateProof, ExecutableTransaction, VerifiedExecutableTransaction,
     },
     messages_grpc::TxStatusUpdate,
     move_authenticator::MoveAuthenticator,
@@ -886,7 +887,7 @@ async fn attested_move_auth_tx_denylisted_at_execution_does_not_crash_validator(
     // `prepare_certificate` runs the deny-list re-check → `AddressDeniedForCoin`.
     let attestation = Attestation::Validator {
         payload: AttestationData::V1 {
-            estimated_computation_cost: 1_000_000,
+            computation_units: 1_000_000,
             object_versions: vec![],
         },
         attestor_index: AuthorityIndex::new_for_test(0),

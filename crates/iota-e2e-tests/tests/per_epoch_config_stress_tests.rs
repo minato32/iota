@@ -4,6 +4,7 @@
 
 use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
 
+use iota_core::VerifiedExecutableAttestedTransaction;
 use iota_json_rpc_types::IotaTransactionBlockEffectsAPI;
 use iota_macros::sim_test;
 use iota_types::{
@@ -11,9 +12,7 @@ use iota_types::{
     base_types::{EpochId, Identifier, IotaAddress, ObjectID, ObjectRef, SequenceNumber, TypeTag},
     deny_list_v1::{check_address_denied_by_config, get_per_type_coin_deny_list_v1},
     error::{IotaError, UserInputError},
-    executable_transaction::{
-        VerifiedExecutableAttestedTransaction, VerifiedExecutableTransaction,
-    },
+    executable_transaction::VerifiedExecutableTransaction,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     transaction::{CallArg, SharedObjectRef, TransactionData, VerifiedCertificate},
 };
@@ -432,7 +431,7 @@ async fn attested_tx_denylisted_at_execution_does_not_crash_validator() {
     );
     let attestation = Attestation::Validator {
         payload: AttestationData::V1 {
-            estimated_computation_cost: 1_000_000,
+            computation_units: 1_000_000,
             object_versions: vec![],
         },
         attestor_index: AuthorityIndex::new_for_test(0),

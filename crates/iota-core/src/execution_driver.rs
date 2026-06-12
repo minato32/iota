@@ -7,7 +7,9 @@ use std::sync::{Arc, Weak};
 use iota_common::{fatal, random::get_rng};
 use iota_macros::fail_point_async;
 use iota_metrics::{monitored_scope, spawn_monitored_task};
-use iota_types::{effects::TransactionEffectsAPI, error::IotaError};
+use iota_types::{
+    effects::TransactionEffectsAPI, error::IotaError, transaction::TransactionDataAPI,
+};
 use rand::Rng;
 use tokio::sync::{Semaphore, mpsc::UnboundedReceiver, oneshot};
 use tracing::{Instrument, error_span, info, instrument, warn};
@@ -133,18 +135,22 @@ pub async fn execution_process(
             };
 
             // Emit attestation accuracy metrics for transactions that arrived
-            // as `UserTransactionV2`. Both costs are in NANOS - the attestation
-            // stores the estimate as the raw `computation_cost`, and `actual`
-            // is the NANOS cost from the effects - so the ratio is meaningful.
-            if let Some(attested) = certificate.attested_computation_cost() {
-                let actual = effects.gas_cost_summary().computation_cost;
+            // as `UserTransactionV2`, in gas units (CU). The attestation stores
+            // the estimate in units; the actual is the effects' NANOS cost
+            // divided by the tx gas price, so the two are comparable.
+            if let Some(attested_units) = certificate.attested_computation_units() {
+                let actual_units = effects
+                    .gas_cost_summary()
+                    .computation_cost
+                    .checked_div(certificate.transaction_data().gas_price())
+                    .unwrap_or(0);
 
-                authority.metrics.attested_computation_cost.observe(attested as f64);
-                authority.metrics.actual_computation_cost.observe(actual as f64);
-                if attested > 0 {
+                authority.metrics.attested_computation_units.observe(attested_units as f64);
+                authority.metrics.actual_computation_units.observe(actual_units as f64);
+                if attested_units > 0 {
                     authority.metrics
-                        .actual_to_attested_computation_cost_ratio
-                        .observe(actual as f64 / attested as f64);
+                        .actual_to_attested_computation_units_ratio
+                        .observe(actual_units as f64 / attested_units as f64);
                 }
             }
 
