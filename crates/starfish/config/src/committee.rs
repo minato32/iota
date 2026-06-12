@@ -57,8 +57,8 @@ impl Committee {
         );
 
         {
-            // Compare keys by their serialized bytes; the key types cache
-            // bytes internally, which clippy rejects as set keys.
+            // Compare keys by serialized bytes: the key types have interior
+            // mutability (cached byte encodings), making them unfit set keys.
             let mut seen_authority_keys = BTreeSet::new();
             let mut seen_protocol_keys = BTreeSet::new();
             let mut seen_network_keys = BTreeSet::new();
@@ -92,7 +92,8 @@ impl Committee {
             .try_fold(0u64, u64::checked_add)
             .expect("Total stake must not overflow u64!");
         assert_ne!(total_stake, 0, "Total stake cannot be zero!");
-        let quorum_threshold = 2 * total_stake / 3 + 1;
+        // Widen to u128 for the doubling; the result is at most total_stake.
+        let quorum_threshold = (2 * total_stake as u128 / 3 + 1) as u64;
         let validity_threshold = total_stake.div_ceil(3);
         let committee_size = authorities.len();
         // f and info_length are computed for uniform stakes

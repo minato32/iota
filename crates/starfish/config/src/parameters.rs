@@ -225,52 +225,62 @@ impl Parameters {
         let positive_fields = [
             (
                 "max_headers_per_commit_sync_fetch",
-                self.max_headers_per_commit_sync_fetch,
+                self.max_headers_per_commit_sync_fetch as u128,
             ),
             (
                 "max_transactions_per_commit_sync_fetch",
-                self.max_transactions_per_commit_sync_fetch,
+                self.max_transactions_per_commit_sync_fetch as u128,
             ),
             (
                 "max_headers_per_header_sync_fetch",
-                self.max_headers_per_header_sync_fetch,
+                self.max_headers_per_header_sync_fetch as u128,
             ),
             (
                 "max_transactions_per_transaction_sync_fetch",
-                self.max_transactions_per_transaction_sync_fetch,
+                self.max_transactions_per_transaction_sync_fetch as u128,
             ),
             (
                 "dag_state_cached_rounds",
-                self.dag_state_cached_rounds as usize,
+                self.dag_state_cached_rounds as u128,
             ),
             (
                 "commit_sync_parallel_fetches",
-                self.commit_sync_parallel_fetches,
+                self.commit_sync_parallel_fetches as u128,
             ),
             (
                 "commit_sync_batch_size",
-                self.commit_sync_batch_size as usize,
+                self.commit_sync_batch_size as u128,
             ),
-            ("commit_sync_batches_ahead", self.commit_sync_batches_ahead),
-            ("max_headers_per_bundle", self.max_headers_per_bundle),
-            ("max_shards_per_bundle", self.max_shards_per_bundle),
+            (
+                "commit_sync_batches_ahead",
+                self.commit_sync_batches_ahead as u128,
+            ),
+            (
+                "max_headers_per_bundle",
+                self.max_headers_per_bundle as u128,
+            ),
+            ("max_shards_per_bundle", self.max_shards_per_bundle as u128),
             (
                 "fast_commit_sync_batch_size",
-                self.fast_commit_sync_batch_size as usize,
+                self.fast_commit_sync_batch_size as u128,
             ),
             (
                 "tonic.connection_buffer_size",
-                self.tonic.connection_buffer_size,
+                self.tonic.connection_buffer_size as u128,
             ),
-            ("tonic.message_size_limit", self.tonic.message_size_limit),
+            (
+                "tonic.message_size_limit",
+                self.tonic.message_size_limit as u128,
+            ),
+            (
+                "tonic.keepalive_interval",
+                self.tonic.keepalive_interval.as_nanos(),
+            ),
         ];
         for (name, value) in positive_fields {
             if value == 0 {
                 return Err(format!("{name} must be positive"));
             }
-        }
-        if self.tonic.keepalive_interval.is_zero() {
-            return Err("tonic.keepalive_interval must be positive".to_string());
         }
         Ok(())
     }

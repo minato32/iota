@@ -76,8 +76,8 @@ impl ReputationScores {
     /// sorted by score descending. This converts it to scores_per_authority
     /// indexed by authority.
     ///
-    /// Scores originate from fetched commits, so an out-of-range authority
-    /// index is rejected instead of indexing past the committee size.
+    /// Returns `InvalidAuthorityIndex` if an authority index is out of range
+    /// for the committee; the scores originate from fetched commits.
     pub(crate) fn from_scores_desc(
         num_authorities: usize,
         commit_range: CommitRange,

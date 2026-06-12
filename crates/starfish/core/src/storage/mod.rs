@@ -193,8 +193,7 @@ pub(crate) trait Store: Send + Sync {
     ) -> ConsensusResult<Vec<Option<VerifiedBlockHeader>>>;
 
     /// Returns true if fast commit sync was ongoing when the node last shut
-    /// down. Storage read failures are propagated instead of being treated
-    /// as "not ongoing", since the flag decides which recovery path runs.
+    /// down. Errors if the flag cannot be read from storage.
     fn read_fast_sync_ongoing(&self) -> ConsensusResult<bool>;
 }
 

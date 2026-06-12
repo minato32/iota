@@ -70,6 +70,16 @@ fn committee_rejects_total_stake_overflow() {
 }
 
 #[test]
+fn committee_computes_thresholds_for_large_total_stake() {
+    let committee = Committee::new(0, test_authorities(&[u64::MAX / 2, u64::MAX / 2]));
+    let total = committee.total_stake();
+    assert_eq!(total, u64::MAX - 1);
+    // A wrapped threshold computation would land near total / 3.
+    assert!(committee.quorum_threshold() > total / 2);
+    assert!(committee.quorum_threshold() <= total);
+}
+
+#[test]
 #[should_panic(expected = "Duplicate authority key")]
 fn committee_rejects_duplicate_authority_key() {
     let mut authorities = test_authorities(&[1, 1]);
