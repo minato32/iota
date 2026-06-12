@@ -9,6 +9,25 @@ use starfish_config::{
     Authority, AuthorityKeyPair, Committee, NetworkKeyPair, ProtocolKeyPair, Stake,
 };
 
+fn test_authorities(stakes: &[Stake]) -> Vec<Authority> {
+    let mut authorities = vec![];
+    let mut rng = StdRng::from_seed([9; 32]);
+    for (i, stake) in stakes.iter().enumerate() {
+        let authority_keypair = AuthorityKeyPair::generate(&mut rng);
+        let protocol_keypair = ProtocolKeyPair::generate(&mut rng);
+        let network_keypair = NetworkKeyPair::generate(&mut rng);
+        authorities.push(Authority {
+            stake: *stake,
+            address: Multiaddr::empty(),
+            hostname: format!("test_host_{i}"),
+            authority_key: authority_keypair.public(),
+            protocol_key: protocol_keypair.public(),
+            network_key: network_keypair.public(),
+        });
+    }
+    authorities
+}
+
 // Committee is not sent over network or stored on disk itself, but some of its
 // fields are. So this test can still be useful to detect accidental format
 // changes.
@@ -36,4 +55,40 @@ fn committee_snapshot_matches() {
     let committee = Committee::new(epoch, authorities);
 
     assert_yaml_snapshot!("committee", committee)
+}
+
+#[test]
+#[should_panic(expected = "cannot have zero stake")]
+fn committee_rejects_zero_stake_authority() {
+    Committee::new(0, test_authorities(&[1, 0, 1]));
+}
+
+#[test]
+#[should_panic(expected = "Total stake must not overflow")]
+fn committee_rejects_total_stake_overflow() {
+    Committee::new(0, test_authorities(&[u64::MAX, 1]));
+}
+
+#[test]
+#[should_panic(expected = "Duplicate authority key")]
+fn committee_rejects_duplicate_authority_key() {
+    let mut authorities = test_authorities(&[1, 1]);
+    authorities[1].authority_key = authorities[0].authority_key.clone();
+    Committee::new(0, authorities);
+}
+
+#[test]
+#[should_panic(expected = "Duplicate protocol key")]
+fn committee_rejects_duplicate_protocol_key() {
+    let mut authorities = test_authorities(&[1, 1]);
+    authorities[1].protocol_key = authorities[0].protocol_key.clone();
+    Committee::new(0, authorities);
+}
+
+#[test]
+#[should_panic(expected = "Duplicate network key")]
+fn committee_rejects_duplicate_network_key() {
+    let mut authorities = test_authorities(&[1, 1]);
+    authorities[1].network_key = authorities[0].network_key.clone();
+    Committee::new(0, authorities);
 }

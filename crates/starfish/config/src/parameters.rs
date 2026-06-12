@@ -216,6 +216,65 @@ impl Parameters {
         }
     }
 
+    /// Validates operator-provided values whose zero value stalls the node:
+    /// zero-sized fetch or bundle limits silently disable synchronization and
+    /// block dissemination, and a zero keepalive interval (also used as the
+    /// keepalive timeout) tears down every connection immediately. Returns a
+    /// description of the first offending field.
+    pub fn validate(&self) -> Result<(), String> {
+        let positive_fields = [
+            (
+                "max_headers_per_commit_sync_fetch",
+                self.max_headers_per_commit_sync_fetch,
+            ),
+            (
+                "max_transactions_per_commit_sync_fetch",
+                self.max_transactions_per_commit_sync_fetch,
+            ),
+            (
+                "max_headers_per_header_sync_fetch",
+                self.max_headers_per_header_sync_fetch,
+            ),
+            (
+                "max_transactions_per_transaction_sync_fetch",
+                self.max_transactions_per_transaction_sync_fetch,
+            ),
+            (
+                "dag_state_cached_rounds",
+                self.dag_state_cached_rounds as usize,
+            ),
+            (
+                "commit_sync_parallel_fetches",
+                self.commit_sync_parallel_fetches,
+            ),
+            (
+                "commit_sync_batch_size",
+                self.commit_sync_batch_size as usize,
+            ),
+            ("commit_sync_batches_ahead", self.commit_sync_batches_ahead),
+            ("max_headers_per_bundle", self.max_headers_per_bundle),
+            ("max_shards_per_bundle", self.max_shards_per_bundle),
+            (
+                "fast_commit_sync_batch_size",
+                self.fast_commit_sync_batch_size as usize,
+            ),
+            (
+                "tonic.connection_buffer_size",
+                self.tonic.connection_buffer_size,
+            ),
+            ("tonic.message_size_limit", self.tonic.message_size_limit),
+        ];
+        for (name, value) in positive_fields {
+            if value == 0 {
+                return Err(format!("{name} must be positive"));
+            }
+        }
+        if self.tonic.keepalive_interval.is_zero() {
+            return Err("tonic.keepalive_interval must be positive".to_string());
+        }
+        Ok(())
+    }
+
     // Maximum number of block headers to fetch per commit sync request.
     pub(crate) fn default_max_headers_per_commit_sync_fetch() -> usize {
         if cfg!(msim) {

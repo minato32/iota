@@ -359,7 +359,9 @@ impl DagState {
             };
 
         // Read fast sync flag from storage
-        let fast_sync_ongoing = store.read_fast_sync_ongoing();
+        let fast_sync_ongoing = store
+            .read_fast_sync_ongoing()
+            .unwrap_or_else(|e| panic!("Failed to read from storage: {e:?}"));
 
         let mut unscored_committed_subdags = Vec::new();
         let mut scoring_subdag = ScoringSubdag::new(context.clone());
@@ -787,7 +789,9 @@ impl DagState {
     }
 
     pub(crate) fn fast_sync_ongoing(&self) -> bool {
-        self.store.read_fast_sync_ongoing()
+        self.store
+            .read_fast_sync_ongoing()
+            .unwrap_or_else(|e| panic!("Failed to read from storage: {e:?}"))
     }
 
     /// Returns the leader round of the last solid commit (backward

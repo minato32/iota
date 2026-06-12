@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    collections::BTreeSet,
     fmt::{Display, Formatter},
     ops::{Index, IndexMut},
 };
@@ -43,6 +44,10 @@ pub struct Committee {
 }
 
 impl Committee {
+    /// Panics on invalid input: empty or oversized committee, zero or
+    /// overflowing stake, or duplicate keys. The committee is computed
+    /// on chain, so violations indicate a corrupted or misconstructed
+    /// configuration rather than a recoverable condition.
     pub fn new(epoch: Epoch, authorities: Vec<Authority>) -> Self {
         assert!(!authorities.is_empty(), "Committee cannot be empty!");
         assert!(
@@ -51,7 +56,41 @@ impl Committee {
             authorities.len()
         );
 
-        let total_stake = authorities.iter().map(|a| a.stake).sum::<u64>();
+        {
+            // Compare keys by their serialized bytes; the key types cache
+            // bytes internally, which clippy rejects as set keys.
+            let mut seen_authority_keys = BTreeSet::new();
+            let mut seen_protocol_keys = BTreeSet::new();
+            let mut seen_network_keys = BTreeSet::new();
+            for authority in &authorities {
+                assert!(
+                    authority.stake > 0,
+                    "Authority {} cannot have zero stake!",
+                    authority.hostname
+                );
+                assert!(
+                    seen_authority_keys.insert(authority.authority_key.to_bytes()),
+                    "Duplicate authority key for {}!",
+                    authority.hostname
+                );
+                assert!(
+                    seen_protocol_keys.insert(authority.protocol_key.to_bytes()),
+                    "Duplicate protocol key for {}!",
+                    authority.hostname
+                );
+                assert!(
+                    seen_network_keys.insert(authority.network_key.to_bytes()),
+                    "Duplicate network key for {}!",
+                    authority.hostname
+                );
+            }
+        }
+
+        let total_stake = authorities
+            .iter()
+            .map(|a| a.stake)
+            .try_fold(0u64, u64::checked_add)
+            .expect("Total stake must not overflow u64!");
         assert_ne!(total_stake, 0, "Total stake cannot be zero!");
         let quorum_threshold = 2 * total_stake / 3 + 1;
         let validity_threshold = total_stake.div_ceil(3);

@@ -646,7 +646,7 @@ impl Core {
                         &mut dag_state,
                         commit.index(),
                         reputation_scores,
-                    );
+                    )?;
                 }
 
                 dag_state.add_commit(commit.clone());

@@ -291,7 +291,11 @@ impl CommitObserver {
         // Phase 2: Recover linearizer and solidifier state
         // Skip if fast sync is ongoing - block data may not be available and
         // this will be reinitialized by fast commit syncer anyway
-        if self.store.read_fast_sync_ongoing() {
+        if self
+            .store
+            .read_fast_sync_ongoing()
+            .unwrap_or_else(|e| panic!("Failed to read from storage: {e:?}"))
+        {
             info!("Skipping linearizer/solidifier recovery - fast sync ongoing");
             return;
         }
