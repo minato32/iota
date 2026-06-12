@@ -148,12 +148,12 @@ async fn test_claim_smart_account_secp256r1() -> Result<(), anyhow::Error> {
     run_claim_transition(Actor::secp256r1(12), false).await
 }
 
-/// Same as above for MultiSig (secp-only committee; see
-/// `Actor::multisig_secp_only` for why Ed25519 members are excluded for now).
+/// Same as above for MultiSig (2-of-3 mixed-scheme committee; the Move-side
+/// address derivation for Ed25519 members matches the node since #11869).
 #[sim_test]
 async fn test_claim_smart_account_multisig() -> Result<(), anyhow::Error> {
     telemetry_subscribers::init_for_testing();
-    run_claim_transition(Actor::multisig_secp_only(13), false).await
+    run_claim_transition(Actor::multisig_mixed(13), false).await
 }
 
 /// Same as above for Passkey: the passkey signs both the claim transaction
@@ -639,7 +639,7 @@ type PasskeySigner =
 /// matrices: address derivation, Move-side flag-prefixed public key bytes and
 /// transaction signing.
 enum Actor {
-    Simple(IotaKeyPair),
+    Simple(Box<IotaKeyPair>),
     MultiSig {
         keys: Vec<IotaKeyPair>,
         multisig_pk: MultiSigPublicKey,
@@ -653,20 +653,20 @@ enum Actor {
 
 impl Actor {
     fn ed25519(seed: u8) -> Self {
-        Self::Simple(IotaKeyPair::Ed25519(Ed25519KeyPair::generate(
+        Self::Simple(Box::new(IotaKeyPair::Ed25519(Ed25519KeyPair::generate(
             &mut StdRng::from_seed([seed; 32]),
-        )))
+        ))))
     }
 
     fn secp256k1(seed: u8) -> Self {
-        Self::Simple(IotaKeyPair::Secp256k1(Secp256k1KeyPair::generate(
-            &mut StdRng::from_seed([seed; 32]),
+        Self::Simple(Box::new(IotaKeyPair::Secp256k1(
+            Secp256k1KeyPair::generate(&mut StdRng::from_seed([seed; 32])),
         )))
     }
 
     fn secp256r1(seed: u8) -> Self {
-        Self::Simple(IotaKeyPair::Secp256r1(Secp256r1KeyPair::generate(
-            &mut StdRng::from_seed([seed; 32]),
+        Self::Simple(Box::new(IotaKeyPair::Secp256r1(
+            Secp256r1KeyPair::generate(&mut StdRng::from_seed([seed; 32])),
         )))
     }
 
@@ -683,30 +683,6 @@ impl Actor {
         ];
         let multisig_pk =
             MultiSigPublicKey::new(keys.iter().map(|k| k.public()).collect(), vec![1, 1, 1], 2)
-                .expect("valid multisig committee");
-        Self::MultiSig { keys, multisig_pk }
-    }
-
-    /// 2-of-2 committee WITHOUT Ed25519 members.
-    ///
-    /// The Move-side multisig address derivation
-    /// (`public_key::multisig_to_hash_input`) currently includes the scheme
-    /// flag for Ed25519 members while the Rust node skips it
-    /// (`SignatureScheme::update_hasher_with_flag`), so `claim_registry::claim`
-    /// would reject committees containing Ed25519 keys. Until that divergence
-    /// is fixed, claim tests use a secp-only committee, for which both sides
-    /// agree.
-    fn multisig_secp_only(seed: u8) -> Self {
-        let keys = vec![
-            IotaKeyPair::Secp256k1(Secp256k1KeyPair::generate(&mut StdRng::from_seed(
-                [seed; 32],
-            ))),
-            IotaKeyPair::Secp256r1(Secp256r1KeyPair::generate(&mut StdRng::from_seed(
-                [seed.wrapping_add(1); 32],
-            ))),
-        ];
-        let multisig_pk =
-            MultiSigPublicKey::new(keys.iter().map(|k| k.public()).collect(), vec![1, 1], 2)
                 .expect("valid multisig committee");
         Self::MultiSig { keys, multisig_pk }
     }
@@ -750,7 +726,7 @@ impl Actor {
         let intent_msg = IntentMessage::new(Intent::iota_transaction(), tx_data.clone());
         match self {
             Self::Simple(kp) => {
-                GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, kp))
+                GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, kp.as_ref()))
             }
             Self::MultiSig { keys, multisig_pk } => {
                 // Sign with the first `threshold` keys.
@@ -1313,14 +1289,16 @@ mod passkey_util {
                     .expect("valid passkey public key");
             let address = IotaAddress::from(&pk);
 
-            let client = std::rc::Rc::new(std::cell::RefCell::new(client));
+            // An async-aware mutex: the client is mutably borrowed across the
+            // WebAuthn `authenticate` await inside `passkey_sign!`.
+            let client = std::rc::Rc::new(tokio::sync::Mutex::new(client));
             let signer_pk = prefixed_pk.clone();
             let signer: PasskeySigner = Box::new(move |tx_data: TransactionData| {
                 let client = client.clone();
                 let origin = origin.clone();
                 let prefixed_pk = signer_pk.clone();
                 Box::pin(async move {
-                    let mut client = client.borrow_mut();
+                    let mut client = client.lock().await;
                     passkey_sign!(client, &origin, prefixed_pk, tx_data)
                 })
             });

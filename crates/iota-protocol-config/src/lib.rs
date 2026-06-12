@@ -546,8 +546,9 @@ struct FeatureFlags {
     #[serde(skip_serializing_if = "is_false")]
     enable_claim_registry: bool,
 
-    // If true, enables implicit Move authentication for EOAs that have an
-    // on-chain IOTAccount with an AuthenticatorFunctionRefV1 attached.
+    // If true, enables the creation of synthetic Move Authenticators for any account (implicit,
+    // i.e., EOAs that do NOT have an on-chain object representation, and explicit, i.e.,
+    // accounts represented on-chain by an object with an AuthenticatorFunctionRefV1 attached).
     #[serde(skip_serializing_if = "is_false")]
     enable_implicit_move_authentication: bool,
 }
@@ -3004,8 +3005,7 @@ impl ProtocolConfig {
                         cfg.builtin_move_authenticator_cost_base = Some(0);
                         // Enable claim registry in devnet only.
                         cfg.feature_flags.enable_claim_registry = true;
-                        // Enable implicit Move authentication for EOAs with on-chain
-                        // IOTAccount in devnet.
+                        // Enable implicit Move authentication in devnet.
                         cfg.feature_flags.enable_implicit_move_authentication = true;
                     }
                 }

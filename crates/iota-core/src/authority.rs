@@ -901,7 +901,7 @@ impl<'a> MoveAuthenticatorInputs<'a> {
         }
     }
 
-    fn new_with_explicits(
+    fn new_with_explicit_authenticators(
         authenticators: Vec<&'a MoveAuthenticator>,
         inputs: Vec<(InputObjects, ObjectReadResult)>,
     ) -> Self {
@@ -1028,7 +1028,7 @@ impl AuthorityState {
         ) = self.read_objects_for_validation(transaction, protocol_config, epoch)?;
 
         // Collect explicit move authenticators and their pre-loaded inputs.
-        let mut auth_inputs = MoveAuthenticatorInputs::new_with_explicits(
+        let mut auth_inputs = MoveAuthenticatorInputs::new_with_explicit_authenticators(
             transaction.move_authenticators(),
             per_authenticator_inputs,
         );
@@ -1875,7 +1875,7 @@ impl AuthorityState {
         let (kind, signer, gas_data) = tx_data.execution_parts();
 
         // Collect explicit move authenticators and their pre-loaded inputs.
-        let mut auth_inputs = MoveAuthenticatorInputs::new_with_explicits(
+        let mut auth_inputs = MoveAuthenticatorInputs::new_with_explicit_authenticators(
             transaction.move_authenticators(),
             per_authenticator_inputs,
         );
@@ -6011,7 +6011,7 @@ impl AuthorityState {
         })?;
         let call_args = vec![CallArg::Pure(sig_bytes)];
 
-        // Create the syntehtic MoveAuthenticator.
+        // Create the synthetic MoveAuthenticator.
         let move_authenticator =
             MoveAuthenticator::new_v1(call_args, vec![], object_to_authenticate);
 
