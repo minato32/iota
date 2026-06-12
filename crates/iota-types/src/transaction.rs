@@ -2161,6 +2161,11 @@ impl SenderSignedData {
     }
 
     pub fn built_in_account_objects(&self) -> IotaResult<Vec<ObjectId>> {
+        // System transactions carry a dummy signature and no real signer, so
+        // they can never authenticate a built-in account.
+        if self.transaction_data().is_system_tx() {
+            return Ok(vec![]);
+        }
         self.tx_signatures()
             .iter()
             .filter_map(|sig| match sig {

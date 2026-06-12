@@ -1837,7 +1837,9 @@ impl ProtocolConfig {
             !enable || self.enable_move_authentication(),
             "enable_implicit_move_authentication requires enable_move_authentication to be set"
         );
-        enable
+        // The implicit path can only produce built-in authenticators, so it is
+        // effectively disabled while built-in Move authenticators are disabled.
+        enable && self.enable_builtin_move_authenticators()
     }
 }
 
