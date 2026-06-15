@@ -44,8 +44,9 @@ use iota_types::{
         CertificateProof, ExecutableTransaction, VerifiedExecutableTransaction,
     },
     global_state_hash::GlobalStateHash,
-    iota_system_state::epoch_start_iota_system_state::{
-        EpochStartSystemState, EpochStartSystemStateTrait,
+    iota_system_state::{
+        attestor_registry::AttestorSet,
+        epoch_start_iota_system_state::{EpochStartSystemState, EpochStartSystemStateTrait},
     },
     message_envelope::TrustedEnvelope,
     messages_checkpoint::{
@@ -614,6 +615,10 @@ pub struct AuthorityPerEpochStore {
     /// Committee of validators for the current epoch.
     committee: Arc<Committee>,
 
+    /// Active attestor set snapshot for this epoch (empty pre-registry).
+    /// Used to verify explicit attestation signatures.
+    attestor_set: Arc<AttestorSet>,
+
     /// Holds the underlying per-epoch typed store tables.
     /// This is an ArcSwapOption because it needs to be used concurrently,
     /// and it needs to be cleared at the end of the epoch.
@@ -1136,9 +1141,16 @@ impl AuthorityPerEpochStore {
 
         let voting_power = committee.members().map(|(_, v)| *v).collect::<Vec<u64>>();
 
+        let attestor_set = Arc::new(
+            epoch_start_configuration
+                .epoch_start_state()
+                .get_attestor_set(),
+        );
+
         let s = Arc::new(Self {
             name,
             committee,
+            attestor_set,
             protocol_config: protocol_config.clone(),
             tables: ArcSwapOption::new(Some(Arc::new(tables))),
             consensus_output_cache,
@@ -1296,6 +1308,13 @@ impl AuthorityPerEpochStore {
 
     pub fn committee(&self) -> &Arc<Committee> {
         &self.committee
+    }
+
+    /// The active attestor set of this epoch, for verifying explicit
+    /// attestation signatures. An attestor's per-epoch index is its position
+    /// in this set.
+    pub fn attestor_set(&self) -> &Arc<AttestorSet> {
+        &self.attestor_set
     }
 
     pub fn protocol_config(&self) -> &ProtocolConfig {
