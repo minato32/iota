@@ -1,3 +1,96 @@
+AttestorRegistryKey
+	public struct
+	0x3::attestor_registry
+AttestorRegistryV1
+	public struct
+	0x3::attestor_registry
+AttestorV1
+	public struct
+	0x3::attestor_registry
+AttestorRegisteredEvent
+	public struct
+	0x3::attestor_registry
+AttestorActivatedEvent
+	public struct
+	0x3::attestor_registry
+AttestorDeregisterRequestedEvent
+	public struct
+	0x3::attestor_registry
+AttestorRemovedEvent
+	public struct
+	0x3::attestor_registry
+AttestorEvictedEvent
+	public struct
+	0x3::attestor_registry
+AttestorBondDepositedEvent
+	public struct
+	0x3::attestor_registry
+AttestorKeyRotationStagedEvent
+	public struct
+	0x3::attestor_registry
+AttestorKeyRotatedEvent
+	public struct
+	0x3::attestor_registry
+is_validator_attestation_enabled
+	fun
+	0x3::attestor_registry
+assert_feature_enabled
+	public(package) fun
+	0x3::attestor_registry
+registry_key
+	public(package) fun
+	0x3::attestor_registry
+new
+	public(package) fun
+	0x3::attestor_registry
+is_valid_attestor_pubkey
+	public(package) fun
+	0x3::attestor_registry
+find_active
+	fun
+	0x3::attestor_registry
+find_pending
+	fun
+	0x3::attestor_registry
+register
+	public(package) fun
+	0x3::attestor_registry
+deregister
+	public(package) fun
+	0x3::attestor_registry
+deposit
+	public(package) fun
+	0x3::attestor_registry
+rotate_key
+	public(package) fun
+	0x3::attestor_registry
+advance_epoch
+	public(package) fun
+	0x3::attestor_registry
+slash
+	public(package) fun
+	0x3::attestor_registry
+active_count
+	public(package) fun
+	0x3::attestor_registry
+pending_count
+	public(package) fun
+	0x3::attestor_registry
+attestor_address
+	public(package) fun
+	0x3::attestor_registry
+attestor_pubkey
+	public(package) fun
+	0x3::attestor_registry
+bond_value
+	public(package) fun
+	0x3::attestor_registry
+activation_epoch
+	public(package) fun
+	0x3::attestor_registry
+active_attestors
+	public(package) fun
+	0x3::attestor_registry
 UnverifiedValidatorOperationCap
 	public struct
 	0x3::validator_cap
@@ -887,6 +980,21 @@ request_set_commission_rate
 	public entry fun
 	0x3::iota_system
 set_candidate_validator_commission_rate
+	public entry fun
+	0x3::iota_system
+load_attestor_registry_mut
+	fun
+	0x3::iota_system
+register_attestor
+	public entry fun
+	0x3::iota_system
+deregister_attestor
+	public entry fun
+	0x3::iota_system
+deposit_attestor_bond
+	public entry fun
+	0x3::iota_system
+rotate_attestor_key
 	public entry fun
 	0x3::iota_system
 request_add_stake
