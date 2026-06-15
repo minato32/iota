@@ -10,6 +10,7 @@ pub mod fullnode_reconfig_observer;
 pub mod in_memory_wallet;
 pub mod options;
 pub mod system_state_observer;
+pub mod td_fullnode_reconfig_observer;
 pub mod util;
 pub mod workloads;
 
@@ -28,6 +29,14 @@ use iota_core::{
         QuorumDriver, QuorumDriverHandler, QuorumDriverHandlerBuilder, QuorumDriverMetrics,
         reconfig_observer::ReconfigObserver,
     },
+    transaction_driver::{
+        SubmitTransactionOptions, TransactionDriver, TransactionDriverMetrics,
+        reconfig_observer::{
+            DummyReconfigObserver as TdDummyReconfigObserver,
+            ReconfigObserver as TdReconfigObserver,
+        },
+    },
+    validator_client_monitor::ValidatorClientMetrics,
 };
 use iota_json_rpc_types::{
     IotaObjectDataOptions, IotaObjectResponseQuery, IotaTransactionBlockEffects,
@@ -38,7 +47,9 @@ use iota_types::{
     base_types::{AuthorityName, IotaAddress, ObjectID, ObjectRef, SequenceNumber},
     committee::{Committee, EpochId},
     crypto::AuthorityStrongQuorumSignInfo,
-    effects::{CertifiedTransactionEffects, TransactionEffectsAPI, TransactionEvents},
+    effects::{
+        CertifiedTransactionEffects, TransactionEffects, TransactionEffectsAPI, TransactionEvents,
+    },
     execution_status::ExecutionFailureStatus,
     gas::GasCostSummary,
     gas_coin::GasCoin,
@@ -50,6 +61,7 @@ use iota_types::{
 };
 use prometheus::Registry;
 use rand::Rng;
+use td_fullnode_reconfig_observer::TdFullNodeReconfigObserver;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -59,6 +71,10 @@ use tracing::{error, info, warn};
 pub enum ExecutionEffects {
     CertifiedTransactionEffects(CertifiedTransactionEffects, TransactionEvents),
     IotaTransactionBlockEffects(IotaTransactionBlockEffects),
+    // TransactionDriver finalizes with raw `TransactionEffects` (a quorum of
+    // signed effects digests, not a single cert), so the direct-to-validator
+    // white-flag path returns the effects directly rather than a cert.
+    FinalizedTransactionEffects(TransactionEffects, TransactionEvents),
 }
 
 impl ExecutionEffects {
@@ -72,6 +88,9 @@ impl ExecutionEffects {
                 .iter()
                 .map(|refe| (refe.reference, refe.owner))
                 .collect(),
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
+                effects.mutated().to_vec()
+            }
         }
     }
 
@@ -85,6 +104,7 @@ impl ExecutionEffects {
                 .iter()
                 .map(|refe| (refe.reference, refe.owner))
                 .collect(),
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => effects.created(),
         }
     }
 
@@ -96,6 +116,9 @@ impl ExecutionEffects {
             ExecutionEffects::IotaTransactionBlockEffects(iota_tx_effects) => {
                 iota_tx_effects.deleted().to_vec()
             }
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
+                effects.deleted().to_vec()
+            }
         }
     }
 
@@ -105,6 +128,9 @@ impl ExecutionEffects {
                 Some(certified_effects.auth_sig())
             }
             ExecutionEffects::IotaTransactionBlockEffects(_) => None,
+            // TransactionDriver finality is a quorum of signed effects digests,
+            // not a single aggregated cert, so there is no quorum sig to expose.
+            ExecutionEffects::FinalizedTransactionEffects(..) => None,
         }
     }
 
@@ -117,6 +143,7 @@ impl ExecutionEffects {
                 let refe = &iota_tx_effects.gas_object();
                 (refe.reference, refe.owner)
             }
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => effects.gas_object(),
         }
     }
 
@@ -132,31 +159,37 @@ impl ExecutionEffects {
             ExecutionEffects::IotaTransactionBlockEffects(iota_tx_effects) => {
                 iota_tx_effects.status().is_ok()
             }
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
+                effects.status().is_success()
+            }
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
         match self {
             ExecutionEffects::CertifiedTransactionEffects(effects, ..) => {
-                match effects.data().status() {
-                    iota_types::execution_status::ExecutionStatus::Success => false,
-                    iota_types::execution_status::ExecutionStatus::Failure {
-                        error:
-                            ExecutionFailureStatus::ExecutionCancelledDueToSharedObjectCongestion {
-                                ..
-                            }
-                            | ExecutionFailureStatus::ExecutionCancelledDueToSharedObjectCongestionV2 {
-                                ..
-                            },
-                        ..
-                    } => true,
-                    _ => false,
-                }
+                Self::status_is_cancelled(effects.data().status())
             }
             ExecutionEffects::IotaTransactionBlockEffects(iota_tx_effects) => {
                 let status = format!("{}", iota_tx_effects.status());
                 status.contains("ExecutionCancelledDueToSharedObjectCongestion")
             }
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
+                Self::status_is_cancelled(effects.status())
+            }
+        }
+    }
+
+    fn status_is_cancelled(status: &iota_types::execution_status::ExecutionStatus) -> bool {
+        match status {
+            iota_types::execution_status::ExecutionStatus::Success => false,
+            iota_types::execution_status::ExecutionStatus::Failure {
+                error:
+                    ExecutionFailureStatus::ExecutionCancelledDueToSharedObjectCongestion { .. }
+                    | ExecutionFailureStatus::ExecutionCancelledDueToSharedObjectCongestionV2 { .. },
+                ..
+            } => true,
+            _ => false,
         }
     }
 
@@ -168,6 +201,9 @@ impl ExecutionEffects {
             ExecutionEffects::IotaTransactionBlockEffects(iota_tx_effects) => {
                 format!("{:#?}", iota_tx_effects.status())
             }
+            ExecutionEffects::FinalizedTransactionEffects(effects, ..) => {
+                format!("{:#?}", effects.status())
+            }
         }
     }
 
@@ -178,6 +214,9 @@ impl ExecutionEffects {
             }
             crate::ExecutionEffects::IotaTransactionBlockEffects(b) => {
                 std::convert::Into::<GasCostSummary>::into(b.gas_cost_summary().clone())
+            }
+            crate::ExecutionEffects::FinalizedTransactionEffects(effects, _) => {
+                effects.gas_cost_summary().clone()
             }
         }
     }
@@ -236,12 +275,24 @@ pub trait ValidatorProxy {
     async fn get_committee(&self) -> Result<Vec<IotaAddress>, anyhow::Error>;
 }
 
+// The driver the direct-to-validator proxy uses to submit transactions. Picked
+// to match the fullnode's TransactionOrchestrator: white-flag flow on =>
+// TransactionDriver (the attested, direct-to-consensus flow), off =>
+// QuorumDriver (the legacy flow).
+enum LocalDriver {
+    Qd {
+        // Stress client does not verify individual validator signatures since this is very
+        // expensive
+        _qd_handler: QuorumDriverHandler<NetworkAuthorityClient>,
+        qd: Arc<QuorumDriver<NetworkAuthorityClient>>,
+    },
+    Td(Arc<TransactionDriver<NetworkAuthorityClient>>),
+}
+
 // TODO: Eventually remove this proxy because we shouldn't rely on validators to
 // read objects.
 pub struct LocalValidatorAggregatorProxy {
-    _qd_handler: QuorumDriverHandler<NetworkAuthorityClient>,
-    // Stress client does not verify individual validator signatures since this is very expensive
-    qd: Arc<QuorumDriver<NetworkAuthorityClient>>,
+    driver: LocalDriver,
     committee: Committee,
     clients: BTreeMap<AuthorityName, NetworkAuthorityClient>,
 }
@@ -257,12 +308,32 @@ impl LocalValidatorAggregatorProxy {
             .build_network_clients();
         let committee = genesis.committee().unwrap();
 
+        // Decide which driver to use the same way the fullnode's
+        // TransactionOrchestrator does: white-flag flow on => TransactionDriver,
+        // off => QuorumDriver. The flag is normally set via a runtime
+        // protocol-config override on the nodes, so the genesis blob (which only
+        // carries the version default) is NOT a reliable source — we read the
+        // EFFECTIVE value from a fullnode's protocol config over RPC. When no
+        // fullnode URL is available (e.g. the embedded local-network path) we
+        // fall back to QuorumDriver, preserving the previous behavior.
+        let use_transaction_driver = match reconfig_fullnode_rpc_url {
+            Some(url) => detect_white_flag_flow(url).await,
+            None => {
+                info!(
+                    "No fullnode RPC URL available; defaulting to QuorumDriver \
+                     (white-flag-flow detection skipped)"
+                );
+                false
+            }
+        };
+
         Self::new_impl(
             aggregator,
             registry,
             reconfig_fullnode_rpc_url,
             clients,
             committee,
+            use_transaction_driver,
         )
         .await
     }
@@ -273,55 +344,145 @@ impl LocalValidatorAggregatorProxy {
         reconfig_fullnode_rpc_url: Option<&str>,
         clients: BTreeMap<AuthorityName, NetworkAuthorityClient>,
         committee: Committee,
+        use_transaction_driver: bool,
     ) -> Self {
-        let quorum_driver_metrics = Arc::new(QuorumDriverMetrics::new(registry));
-        let (aggregator, reconfig_observer): (
-            Arc<_>,
-            Arc<dyn ReconfigObserver<NetworkAuthorityClient> + Sync + Send>,
-        ) = if let Some(reconfig_fullnode_rpc_url) = reconfig_fullnode_rpc_url {
-            info!(
-                "Using FullNodeReconfigObserver: {:?}",
-                reconfig_fullnode_rpc_url
-            );
-            let committee_store = aggregator.clone_committee_store();
-            let reconfig_observer = Arc::new(
-                FullNodeReconfigObserver::new(
-                    reconfig_fullnode_rpc_url,
-                    committee_store,
-                    aggregator.safe_client_metrics_base.clone(),
-                    aggregator.metrics.clone(),
+        if use_transaction_driver {
+            // ----- TransactionDriver (white-flag direct-to-consensus flow) -----
+            info!("Using TransactionDriver for direct-to-validator submission");
+            let td_metrics = Arc::new(TransactionDriverMetrics::new(registry));
+            let client_metrics = Arc::new(ValidatorClientMetrics::new(registry));
+            let aggregator = Arc::new(aggregator);
+
+            // TD reconfig observer: poll the fullnode RPC (the TransactionDriver
+            // analog of the QuorumDriver FullNodeReconfigObserver). Falls back to
+            // a no-op observer when no fullnode URL is available (committee then
+            // stays fixed for the run).
+            let td_reconfig_observer: Arc<
+                dyn TdReconfigObserver<NetworkAuthorityClient> + Sync + Send,
+            > = if let Some(url) = reconfig_fullnode_rpc_url {
+                info!("Using TdFullNodeReconfigObserver: {:?}", url);
+                Arc::new(
+                    TdFullNodeReconfigObserver::new(
+                        url,
+                        aggregator.clone_committee_store(),
+                        aggregator.safe_client_metrics_base.clone(),
+                        aggregator.metrics.clone(),
+                    )
+                    .await,
                 )
-                .await,
+            } else {
+                info!("Using TD DummyReconfigObserver (committee fixed for the run)");
+                Arc::new(TdDummyReconfigObserver)
+            };
+
+            let td = TransactionDriver::new(
+                aggregator,
+                td_reconfig_observer,
+                td_metrics,
+                None, // node_config: use default ValidatorClientMonitor config
+                client_metrics,
             );
-            (Arc::new(aggregator), reconfig_observer)
+            Self {
+                driver: LocalDriver::Td(td),
+                clients,
+                committee,
+            }
         } else {
-            info!("Using EmbeddedReconfigObserver");
-            let reconfig_observer = Arc::new(EmbeddedReconfigObserver::new());
-            // Get the latest committee from config observer
-            let aggregator = reconfig_observer
-                .get_committee(Arc::new(aggregator))
-                .await
-                .expect("Failed to get latest committee");
-            (aggregator, reconfig_observer)
-        };
-        let qd_handler_builder =
-            QuorumDriverHandlerBuilder::new(aggregator, quorum_driver_metrics.clone())
-                .with_reconfig_observer(reconfig_observer.clone());
-        let qd_handler = qd_handler_builder.start();
-        let qd = qd_handler.clone_quorum_driver();
-        Self {
-            _qd_handler: qd_handler,
-            qd,
-            clients,
-            committee,
+            // ----- QuorumDriver (legacy flow) -----
+            info!("Using QuorumDriver for direct-to-validator submission");
+            let quorum_driver_metrics = Arc::new(QuorumDriverMetrics::new(registry));
+            let (aggregator, reconfig_observer): (
+                Arc<_>,
+                Arc<dyn ReconfigObserver<NetworkAuthorityClient> + Sync + Send>,
+            ) = if let Some(reconfig_fullnode_rpc_url) = reconfig_fullnode_rpc_url {
+                info!(
+                    "Using FullNodeReconfigObserver: {:?}",
+                    reconfig_fullnode_rpc_url
+                );
+                let committee_store = aggregator.clone_committee_store();
+                let reconfig_observer = Arc::new(
+                    FullNodeReconfigObserver::new(
+                        reconfig_fullnode_rpc_url,
+                        committee_store,
+                        aggregator.safe_client_metrics_base.clone(),
+                        aggregator.metrics.clone(),
+                    )
+                    .await,
+                );
+                (Arc::new(aggregator), reconfig_observer)
+            } else {
+                info!("Using EmbeddedReconfigObserver");
+                let reconfig_observer = Arc::new(EmbeddedReconfigObserver::new());
+                // Get the latest committee from config observer
+                let aggregator = reconfig_observer
+                    .get_committee(Arc::new(aggregator))
+                    .await
+                    .expect("Failed to get latest committee");
+                (aggregator, reconfig_observer)
+            };
+            let qd_handler_builder =
+                QuorumDriverHandlerBuilder::new(aggregator, quorum_driver_metrics.clone())
+                    .with_reconfig_observer(reconfig_observer.clone());
+            let qd_handler = qd_handler_builder.start();
+            let qd = qd_handler.clone_quorum_driver();
+            Self {
+                driver: LocalDriver::Qd {
+                    _qd_handler: qd_handler,
+                    qd,
+                },
+                clients,
+                committee,
+            }
         }
     }
+
+    // The authority aggregator backing whichever driver is in use (each driver
+    // owns an epoch-updatable aggregator).
+    fn auth_agg(&self) -> Arc<AuthorityAggregator<NetworkAuthorityClient>> {
+        match &self.driver {
+            LocalDriver::Qd { qd, .. } => qd.authority_aggregator().load_full(),
+            LocalDriver::Td(td) => td.authority_aggregator().load_full(),
+        }
+    }
+}
+
+// Read the EFFECTIVE `enable_white_flag_flow` feature flag from a fullnode's
+// protocol config over RPC. This reflects runtime protocol-config overrides
+// (how the flag is toggled in the stress setup), which the genesis blob does
+// not.
+async fn detect_white_flag_flow(fullnode_rpc_url: &str) -> bool {
+    let client = IotaClientBuilder::default()
+        .build(fullnode_rpc_url)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("Can't create IotaClient with rpc url {fullnode_rpc_url}: {e:?}")
+        });
+    let resp = client
+        .read_api()
+        .get_protocol_config(None)
+        .await
+        .expect("Failed to fetch protocol config from fullnode");
+    let enabled = resp
+        .feature_flags
+        .get("enable_white_flag_flow")
+        .copied()
+        .unwrap_or(false);
+    info!(
+        "Detected enable_white_flag_flow={enabled} from fullnode {fullnode_rpc_url}; \
+         direct submission will use {}",
+        if enabled {
+            "TransactionDriver"
+        } else {
+            "QuorumDriver"
+        }
+    );
+    enabled
 }
 
 #[async_trait]
 impl ValidatorProxy for LocalValidatorAggregatorProxy {
     async fn get_object(&self, object_id: ObjectID) -> Result<Object, anyhow::Error> {
-        let auth_agg = self.qd.authority_aggregator().load();
+        let auth_agg = self.auth_agg();
         Ok(auth_agg
             .get_latest_object_version_for_testing(object_id)
             .await?)
@@ -337,7 +498,7 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
     async fn get_latest_system_state_object(
         &self,
     ) -> Result<IotaSystemStateSummary, anyhow::Error> {
-        let auth_agg = self.qd.authority_aggregator().load();
+        let auth_agg = self.auth_agg();
         Ok(auth_agg
             .get_latest_system_state_object_for_testing()
             .await?
@@ -348,45 +509,82 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
         let tx_digest = *tx.digest();
         let mut retry_cnt = 0;
         while retry_cnt < 3 {
-            let ticket = self
-                .qd
-                .submit_transaction(
-                    iota_types::quorum_driver_types::ExecuteTransactionRequestV1 {
-                        transaction: tx.clone(),
-                        include_events: true,
-                        include_input_objects: false,
-                        include_output_objects: false,
-                        include_auxiliary_data: false,
-                    },
-                )
-                .await?;
-            // The ticket only times out when QuorumDriver exceeds the retry times
-            match ticket.await {
-                Ok(resp) => {
-                    let QuorumDriverResponse {
-                        effects_cert,
-                        events,
-                        ..
-                    } = resp;
-                    return Ok(ExecutionEffects::CertifiedTransactionEffects(
-                        effects_cert.into(),
-                        events.unwrap_or_default(),
-                    ));
+            match &self.driver {
+                LocalDriver::Qd { qd, .. } => {
+                    let ticket = qd
+                        .submit_transaction(
+                            iota_types::quorum_driver_types::ExecuteTransactionRequestV1 {
+                                transaction: tx.clone(),
+                                include_events: true,
+                                include_input_objects: false,
+                                include_output_objects: false,
+                                include_auxiliary_data: false,
+                            },
+                        )
+                        .await?;
+                    // The ticket only times out when QuorumDriver exceeds the retry times
+                    match ticket.await {
+                        Ok(resp) => {
+                            let QuorumDriverResponse {
+                                effects_cert,
+                                events,
+                                ..
+                            } = resp;
+                            return Ok(ExecutionEffects::CertifiedTransactionEffects(
+                                effects_cert.into(),
+                                events.unwrap_or_default(),
+                            ));
+                        }
+                        Err(QuorumDriverError::NonRecoverableTransactionError { errors }) => {
+                            bail!(QuorumDriverError::NonRecoverableTransactionError { errors });
+                        }
+                        Err(err) => {
+                            let delay =
+                                Duration::from_millis(rand::thread_rng().gen_range(100..1000));
+                            warn!(
+                                ?tx_digest,
+                                retry_cnt,
+                                "Transaction failed with err: {:?}. Sleeping for {:?} ...",
+                                err,
+                                delay,
+                            );
+                            retry_cnt += 1;
+                            sleep(delay).await;
+                        }
+                    }
                 }
-                Err(QuorumDriverError::NonRecoverableTransactionError { errors }) => {
-                    bail!(QuorumDriverError::NonRecoverableTransactionError { errors });
-                }
-                Err(err) => {
-                    let delay = Duration::from_millis(rand::thread_rng().gen_range(100..1000));
-                    warn!(
-                        ?tx_digest,
-                        retry_cnt,
-                        "Transaction failed with err: {:?}. Sleeping for {:?} ...",
-                        err,
-                        delay,
-                    );
-                    retry_cnt += 1;
-                    sleep(delay).await;
+                LocalDriver::Td(td) => {
+                    // TransactionDriver drives to finality internally; a returned
+                    // error is a finality/submission failure (execution failures
+                    // come back as Ok with a failure status in the effects).
+                    match td
+                        .drive_transaction(
+                            Some(tx.clone()),
+                            SubmitTransactionOptions::default(),
+                            Some(Duration::from_secs(60)),
+                        )
+                        .await
+                    {
+                        Ok(resp) => {
+                            return Ok(ExecutionEffects::FinalizedTransactionEffects(
+                                resp.effects.effects,
+                                resp.events.unwrap_or_default(),
+                            ));
+                        }
+                        Err(err) => {
+                            let delay =
+                                Duration::from_millis(rand::thread_rng().gen_range(100..1000));
+                            warn!(
+                                ?tx_digest,
+                                retry_cnt,
+                                "TransactionDriver failed with err: {:?}. Sleeping for {:?} ...",
+                                err,
+                                delay,
+                            );
+                            retry_cnt += 1;
+                            sleep(delay).await;
+                        }
+                    }
                 }
             }
         }
@@ -394,19 +592,29 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
     }
 
     fn clone_committee(&self) -> Arc<Committee> {
-        self.qd.clone_committee()
+        self.auth_agg().committee.clone()
     }
 
     fn get_current_epoch(&self) -> EpochId {
-        self.qd.current_epoch()
+        self.auth_agg().committee.epoch()
     }
 
     fn clone_new(&self) -> Box<dyn ValidatorProxy + Send + Sync> {
-        let qdh = self._qd_handler.clone_new();
-        let qd = qdh.clone_quorum_driver();
+        let driver = match &self.driver {
+            LocalDriver::Qd { _qd_handler, .. } => {
+                let qdh = _qd_handler.clone_new();
+                let qd = qdh.clone_quorum_driver();
+                LocalDriver::Qd {
+                    _qd_handler: qdh,
+                    qd,
+                }
+            }
+            // TransactionDriver is shared via Arc; clones drive against the same
+            // instance (and its epoch-updatable aggregator).
+            LocalDriver::Td(td) => LocalDriver::Td(td.clone()),
+        };
         Box::new(Self {
-            _qd_handler: qdh,
-            qd,
+            driver,
             clients: self.clients.clone(),
             committee: self.committee.clone(),
         })
