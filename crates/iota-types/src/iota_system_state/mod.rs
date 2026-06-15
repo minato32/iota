@@ -28,6 +28,7 @@ use crate::{
     versioned::Versioned,
 };
 
+pub mod attestor_registry;
 pub mod epoch_start_iota_system_state;
 pub mod iota_system_state_inner_v1;
 pub mod iota_system_state_inner_v2;
