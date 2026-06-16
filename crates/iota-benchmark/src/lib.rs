@@ -44,7 +44,9 @@ use iota_json_rpc_types::{
 };
 use iota_sdk::{IotaClient, IotaClientBuilder, PagedFn};
 use iota_types::{
-    base_types::{AuthorityName, IotaAddress, ObjectID, ObjectRef, SequenceNumber},
+    base_types::{
+        AuthorityName, ConciseableName, IotaAddress, ObjectID, ObjectRef, SequenceNumber,
+    },
     committee::{Committee, EpochId},
     crypto::AuthorityStrongQuorumSignInfo,
     effects::{
@@ -295,6 +297,10 @@ pub struct LocalValidatorAggregatorProxy {
     driver: LocalDriver,
     committee: Committee,
     clients: BTreeMap<AuthorityName, NetworkAuthorityClient>,
+    // Display names (concise pubkeys) of the validators submission may target.
+    // Empty => any validator. Only honored on the TransactionDriver path; the
+    // QuorumDriver path ignores it. Pins attestation to a subset (validator-1..N).
+    allowed_validators: Vec<String>,
 }
 
 impl LocalValidatorAggregatorProxy {
@@ -302,11 +308,17 @@ impl LocalValidatorAggregatorProxy {
         genesis: &Genesis,
         registry: &Registry,
         reconfig_fullnode_rpc_url: Option<&str>,
+        num_target_validators: Option<u64>,
     ) -> Self {
         let (aggregator, clients) = AuthorityAggregatorBuilder::from_genesis(genesis)
             .with_registry(registry)
             .build_network_clients();
         let committee = genesis.committee().unwrap();
+
+        // Pin submission (and thus attestation) to the first N validators
+        // (validator-1..validator-N). Empty => any validator. Only the
+        // TransactionDriver path honors this; QuorumDriver ignores it.
+        let allowed_validators = pinned_target_validators(genesis, num_target_validators);
 
         // Decide which driver to use the same way the fullnode's
         // TransactionOrchestrator does: white-flag flow on => TransactionDriver,
@@ -334,10 +346,12 @@ impl LocalValidatorAggregatorProxy {
             clients,
             committee,
             use_transaction_driver,
+            allowed_validators,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn new_impl(
         aggregator: AuthorityAggregator<NetworkAuthorityClient>,
         registry: &Registry,
@@ -345,6 +359,7 @@ impl LocalValidatorAggregatorProxy {
         clients: BTreeMap<AuthorityName, NetworkAuthorityClient>,
         committee: Committee,
         use_transaction_driver: bool,
+        allowed_validators: Vec<String>,
     ) -> Self {
         if use_transaction_driver {
             // ----- TransactionDriver (white-flag direct-to-consensus flow) -----
@@ -386,6 +401,7 @@ impl LocalValidatorAggregatorProxy {
                 driver: LocalDriver::Td(td),
                 clients,
                 committee,
+                allowed_validators,
             }
         } else {
             // ----- QuorumDriver (legacy flow) -----
@@ -432,6 +448,7 @@ impl LocalValidatorAggregatorProxy {
                 },
                 clients,
                 committee,
+                allowed_validators,
             }
         }
     }
@@ -477,6 +494,60 @@ async fn detect_white_flag_flow(fullnode_rpc_url: &str) -> bool {
         }
     );
     enabled
+}
+
+// Build the `allowed_validators` list (concise display names, matching what
+// `RequestRetrier` compares against) that pins submission to the first
+// `num_target_validators` validators, ordered validator-1..validator-N by their
+// genesis hostname. Returns empty (=> any validator, current behavior) when the
+// count is unset, 0, or >= the committee size.
+fn pinned_target_validators(genesis: &Genesis, num_target_validators: Option<u64>) -> Vec<String> {
+    let k = match num_target_validators {
+        Some(k) if k > 0 => k as usize,
+        _ => return vec![],
+    };
+    let committee_with_network = genesis.committee_with_network();
+    // (hostname, authority) for each validator; hostname is `validator-N` from
+    // the genesis network address (falls back to the concise key if absent).
+    let mut by_host: Vec<(String, AuthorityName)> = committee_with_network
+        .validators()
+        .iter()
+        .map(|(name, (_stake, meta))| {
+            let host = meta
+                .network_address
+                .hostname()
+                .unwrap_or_else(|| name.concise().to_string());
+            (host, *name)
+        })
+        .collect();
+    if k >= by_host.len() {
+        return vec![]; // pin to all == no restriction
+    }
+    // Order validator-1, validator-2, ... validator-10 (numeric suffix, not
+    // lexicographic) so "first k" is validator-1..validator-k.
+    by_host.sort_by(|a, b| host_sort_key(&a.0).cmp(&host_sort_key(&b.0)));
+    by_host.truncate(k);
+    for (host, name) in &by_host {
+        info!(
+            "Pinning submission/attestation to {host} ({})",
+            name.concise()
+        );
+    }
+    by_host
+        .into_iter()
+        .map(|(_host, name)| name.concise().to_string())
+        .collect()
+}
+
+// Sort key for a `validator-<n>` hostname: (numeric suffix, full string) so
+// validator-2 sorts before validator-10. Non-numeric suffixes sort last.
+fn host_sort_key(host: &str) -> (u64, String) {
+    let num = host
+        .rsplit('-')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    (num, host.to_string())
 }
 
 #[async_trait]
@@ -560,7 +631,10 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
                     match td
                         .drive_transaction(
                             Some(tx.clone()),
-                            SubmitTransactionOptions::default(),
+                            SubmitTransactionOptions {
+                                allowed_validators: self.allowed_validators.clone(),
+                                ..Default::default()
+                            },
                             Some(Duration::from_secs(60)),
                         )
                         .await
@@ -617,6 +691,7 @@ impl ValidatorProxy for LocalValidatorAggregatorProxy {
             driver,
             clients: self.clients.clone(),
             committee: self.committee.clone(),
+            allowed_validators: self.allowed_validators.clone(),
         })
     }
 

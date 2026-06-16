@@ -66,6 +66,13 @@ pub struct Opts {
     /// Otherwise use EmbeddedReconfigObserver,
     #[arg(long, action = clap::ArgAction::Set, default_value = "false", global = true)]
     pub use_fullnode_for_reconfig: bool,
+    /// [Local TransactionDriver path only] Pin submission — and therefore
+    /// attestation — to the first N validators (validator-1..validator-N).
+    /// Clamped to committee size; unset or >= committee size means all
+    /// validators (current behavior). Has NO effect on the fullnode path
+    /// (use_fullnode_for_execution=true) or the QuorumDriver flow.
+    #[arg(long, global = true)]
+    pub num_target_validators: Option<u64>,
     /// Default workload is 100% transfer object
     #[command(subcommand)]
     pub run_spec: RunSpec,
