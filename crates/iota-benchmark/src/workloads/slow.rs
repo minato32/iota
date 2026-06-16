@@ -7,7 +7,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use iota_test_transaction_builder::TestTransactionBuilder;
 use iota_types::{
-    IOTA_CLOCK_OBJECT_ID, IOTA_CLOCK_OBJECT_SHARED_VERSION,
     base_types::{Identifier, IotaAddress, ObjectID, ObjectRef, random_object_ref},
     crypto::get_key_pair,
     object::Owner,
@@ -36,6 +35,9 @@ pub struct SlowTestPayload {
     shared_object_ref: ObjectRef,
     /// address to send slow transactions from
     sender: IotaAddress,
+    /// `slow::slow(n, size)` args: create `n` vectors of `size` bytes.
+    slow_n: u64,
+    slow_size: u64,
     state: InMemoryWallet,
     system_state_observer: Arc<SystemStateObserver>,
 }
@@ -75,21 +77,16 @@ impl SlowTestPayload {
             .reference_gas_price;
 
         let mut builder = ProgrammableTransactionBuilder::new();
-        let args = vec![
-            builder
-                .obj(CallArg::Shared(SharedObjectRef {
-                    object_id: IOTA_CLOCK_OBJECT_ID,
-                    initial_shared_version: IOTA_CLOCK_OBJECT_SHARED_VERSION,
-                    mutable: false,
-                }))
-                .unwrap(),
-        ];
+        // slow::slow(n, size): create `n` vectors of `size` bytes. The amount of
+        // computation (and hence the attestation dry-run cost) scales with these.
+        let n_arg = builder.pure(self.slow_n).unwrap();
+        let size_arg = builder.pure(self.slow_size).unwrap();
         builder.programmable_move_call(
             self.package_id,
             Identifier::new("slow").unwrap(),
-            Identifier::new("bimodal").unwrap(),
+            Identifier::new("slow").unwrap(),
             vec![],
-            args,
+            vec![n_arg, size_arg],
         );
 
         // Add unused mutable shared object input to activate congestion control.
@@ -110,6 +107,8 @@ impl SlowTestPayload {
 #[derive(Debug)]
 pub struct SlowWorkloadBuilder {
     num_payloads: u64,
+    slow_n: u64,
+    slow_size: u64,
 }
 
 #[async_trait]
@@ -150,6 +149,8 @@ impl WorkloadBuilder<dyn Payload> for SlowWorkloadBuilder {
                 f.object_id = ObjectID::ZERO;
                 f
             },
+            slow_n: self.slow_n,
+            slow_size: self.slow_size,
             init_gas: init_gas.pop().unwrap(),
             payload_gas,
         }))
@@ -157,11 +158,14 @@ impl WorkloadBuilder<dyn Payload> for SlowWorkloadBuilder {
 }
 
 impl SlowWorkloadBuilder {
+    #[allow(clippy::too_many_arguments)]
     pub fn from(
         workload_weight: f32,
         target_qps: u64,
         num_workers: u64,
         in_flight_ratio: u64,
+        slow_n: u64,
+        slow_size: u64,
         duration: Interval,
         group: u32,
     ) -> Option<WorkloadBuilderInfo> {
@@ -181,6 +185,8 @@ impl SlowWorkloadBuilder {
             let workload_builder =
                 Box::<dyn WorkloadBuilder<dyn Payload>>::from(Box::new(SlowWorkloadBuilder {
                     num_payloads: max_ops,
+                    slow_n,
+                    slow_size,
                 }));
             let builder_info = WorkloadBuilderInfo {
                 workload_params,
@@ -197,6 +203,9 @@ pub struct SlowWorkload {
     package_id: ObjectID,
     /// ID of the object used for mutable shared input
     shared_obj_ref: ObjectRef,
+    /// `slow::slow(n, size)` args.
+    slow_n: u64,
+    slow_size: u64,
     /// Shared object refs for checking max reads with contention
     // shared_objs: Vec<BenchMoveCallArg>,
     pub init_gas: Gas,
@@ -257,6 +266,8 @@ impl Workload<dyn Payload> for SlowWorkload {
                 package_id: self.package_id,
                 shared_object_ref: self.shared_obj_ref,
                 sender: gas.1,
+                slow_n: self.slow_n,
+                slow_size: self.slow_size,
                 state: InMemoryWallet::new(gas),
                 system_state_observer: system_state_observer.clone(),
             })

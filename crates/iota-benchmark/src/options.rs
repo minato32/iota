@@ -230,6 +230,14 @@ pub enum RunSpec {
         // batch size use for batch payment workload
         #[arg(long, num_args(1..), value_delimiter = ',', default_values_t = [15])]
         batch_payment_size: Vec<u32>,
+        // `slow` workload knobs: each tx runs slow::slow(n, size), creating `n`
+        // vectors of `size` bytes. Larger values => more per-tx computation (the
+        // attestation dry-run scales with this). Defaults match the heavy mode
+        // of the previous hardcoded `slow::bimodal`.
+        #[arg(long, num_args(1..), value_delimiter = ',', default_values_t = [100])]
+        slow_n: Vec<u64>,
+        #[arg(long, num_args(1..), value_delimiter = ',', default_values_t = [100])]
+        slow_size: Vec<u64>,
         // type and load % of adversarial transactions in the benchmark workload.
         // Format is "{adversarial_type}-{load_factor}".
         // `load_factor` is a number between 0.0 and 1.0 which dictates how much load per tx
