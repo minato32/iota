@@ -45,6 +45,7 @@ use crate::{
         ConnectionMonitorStatusForTests, ConsensusAdapter, ConsensusAdapterMetrics,
         MockConsensusClient,
     },
+    execution_scheduler::ExecutionSchedulerAPI,
     safe_client::SafeClient,
     test_authority_clients::LocalAuthorityClient,
     test_utils::{make_transfer_object_move_transaction, make_transfer_object_transaction},

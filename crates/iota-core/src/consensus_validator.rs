@@ -18,7 +18,7 @@ use tracing::{info, instrument, warn};
 
 use crate::{
     authority::authority_per_epoch_store::AuthorityPerEpochStore,
-    checkpoints::CheckpointServiceNotify, transaction_manager::TransactionManager,
+    checkpoints::CheckpointServiceNotify, execution_scheduler::ExecutionSchedulerWrapper,
 };
 
 /// Allows verifying the validity of transactions
@@ -26,7 +26,7 @@ use crate::{
 pub struct IotaTxValidator {
     epoch_store: Arc<AuthorityPerEpochStore>,
     checkpoint_service: Arc<dyn CheckpointServiceNotify + Send + Sync>,
-    _transaction_manager: Arc<TransactionManager>,
+    _transaction_manager: Arc<ExecutionSchedulerWrapper>,
     metrics: Arc<IotaTxValidatorMetrics>,
 }
 
@@ -34,7 +34,7 @@ impl IotaTxValidator {
     pub fn new(
         epoch_store: Arc<AuthorityPerEpochStore>,
         checkpoint_service: Arc<dyn CheckpointServiceNotify + Send + Sync>,
-        transaction_manager: Arc<TransactionManager>,
+        transaction_manager: Arc<ExecutionSchedulerWrapper>,
         metrics: Arc<IotaTxValidatorMetrics>,
     ) -> Self {
         info!(

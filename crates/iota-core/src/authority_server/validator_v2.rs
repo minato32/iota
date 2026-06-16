@@ -54,6 +54,7 @@ use crate::{
     authority::{AuthorityState, authority_per_epoch_store::AuthorityPerEpochStore},
     authority_server::{StreamResponse, ValidatorService, ValidatorServiceMetrics, normalize},
     consensus_adapter::ConsensusAdapter,
+    execution_scheduler::ExecutionSchedulerAPI,
 };
 
 impl ValidatorService {
@@ -572,7 +573,7 @@ impl ValidatorService {
                 num_inflight_execution_transactions: self
                     .state
                     .transaction_manager()
-                    .inflight_queue_len()
+                    .num_pending_certificates()
                     as u64,
                 num_inflight_consensus_transactions: self
                     .consensus_adapter
