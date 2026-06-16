@@ -61,7 +61,9 @@ pub struct TransactionManager {
     // before the inner lock (for read or write) can be acquired. During reconfiguration, we
     // acquire the outer lock for write, to ensure that no other threads can be running while
     // we reconfigure.
-    inner: RwLock<RwLock<Inner>>,
+    // Boxed to keep `TransactionManager` small (it shares an enum_dispatch
+    // wrapper with the much smaller `ExecutionScheduler`).
+    inner: RwLock<RwLock<Box<Inner>>>,
 }
 
 struct CacheInner {
@@ -332,7 +334,10 @@ impl TransactionManager {
             object_cache_read,
             transaction_cache_read,
             metrics: metrics.clone(),
-            inner: RwLock::new(RwLock::new(Inner::new(epoch_store.epoch(), metrics))),
+            inner: RwLock::new(RwLock::new(Box::new(Inner::new(
+                epoch_store.epoch(),
+                metrics,
+            )))),
             tx_ready_transactions,
         }
     }
@@ -782,7 +787,7 @@ impl TransactionManager {
     pub(crate) fn reconfigure(&self, new_epoch: EpochId) {
         let reconfig_lock = self.inner.write();
         let mut inner = reconfig_lock.write();
-        *inner = Inner::new(new_epoch, self.metrics.clone());
+        **inner = Inner::new(new_epoch, self.metrics.clone());
     }
 
     pub(crate) fn check_execution_overload(
