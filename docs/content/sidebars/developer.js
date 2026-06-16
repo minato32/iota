@@ -440,6 +440,7 @@ const developer = [
                             'developer/move/explanations/account-abstraction/design-principles',
                         ],
                     },
+                    'developer/move/explanations/view-functions',
                 ],
             },
             {
@@ -524,6 +525,7 @@ const developer = [
                         label: 'NFT',
                         items: ['developer/iota-101/nft/create-nft', 'developer/iota-101/nft/rent-nft', 'developer/iota-101/nft/marketplace'],
                     },
+                    'developer/move/how-tos/define-a-view-function',
                 ],
             },
             {
@@ -576,6 +578,7 @@ const developer = [
                             'developer/references/move/move-lock',
                             'developer/references/move/abilities',
                             'developer/references/move/generics',
+                            'developer/move/references/view-functions',
                             {
                                 type: 'link',
                                 label: 'Move Language (GitHub)',
