@@ -256,37 +256,52 @@ pub async fn validate_and_resolve_conflicts(
         // Tier 1: Local HashMap (current commit).
         // Tier 2: Consensus quarantine (previous uncommitted commits).
         // Tier 3: Persistent DB (committed data).
+        //
+        // A lock held by this SAME transaction (`locked_by == digest`) is its
+        // own prior-round lock: the tx acquired owned-object locks, was
+        // congestion-deferred, and is reloaded this round. A self-held lock is
+        // NOT a conflict — without exempting it the deferred tx is dropped with
+        // ObjectLockConflict and never executes. Check #0 already dedups
+        // same-commit duplicates by digest, so any self-held lock here is always
+        // this tx's own deferred lock. In practice only tiers 2/3 can hold it
+        // (the per-commit map cannot self-hit, since a tx's own lock is inserted
+        // only after it clears this check), but the exemption is applied
+        // uniformly across all three tiers.
         let mut conflict: Option<IotaError> = None;
         'conflict_check: for obj_ref in &owned_inputs {
             if let Some(&pending_transaction) = current_commit_locks.get(obj_ref) {
-                debug!(
-                    ?digest,
-                    ?obj_ref,
-                    "Transaction conflicts with earlier tx in same commit, dropping"
-                );
-                conflict = Some(IotaError::ObjectLockConflict {
-                    obj_ref: *obj_ref,
-                    pending_transaction,
-                });
-                break 'conflict_check;
+                if pending_transaction != digest {
+                    debug!(
+                        ?digest,
+                        ?obj_ref,
+                        "Transaction conflicts with earlier tx in same commit, dropping"
+                    );
+                    conflict = Some(IotaError::ObjectLockConflict {
+                        obj_ref: *obj_ref,
+                        pending_transaction,
+                    });
+                    break 'conflict_check;
+                }
             }
 
             if let Some(locked_by) = epoch_store.get_quarantined_owned_object_lock(obj_ref) {
-                debug!(
-                    ?digest,
-                    ?obj_ref,
-                    ?locked_by,
-                    "Transaction conflicts with quarantined lock, dropping"
-                );
-                conflict = Some(IotaError::ObjectLockConflict {
-                    obj_ref: *obj_ref,
-                    pending_transaction: locked_by,
-                });
-                break 'conflict_check;
+                if locked_by != digest {
+                    debug!(
+                        ?digest,
+                        ?obj_ref,
+                        ?locked_by,
+                        "Transaction conflicts with quarantined lock, dropping"
+                    );
+                    conflict = Some(IotaError::ObjectLockConflict {
+                        obj_ref: *obj_ref,
+                        pending_transaction: locked_by,
+                    });
+                    break 'conflict_check;
+                }
             }
 
             match epoch_store.tables()?.get_locked_transaction(obj_ref)? {
-                Some(locked_by) => {
+                Some(locked_by) if locked_by != digest => {
                     debug!(
                         ?digest,
                         ?obj_ref,
@@ -299,9 +314,10 @@ pub async fn validate_and_resolve_conflicts(
                     });
                     break 'conflict_check;
                 }
-                None => {
-                    // No lock in DB — this input is free to be locked by
-                    // the current transaction.
+                _ => {
+                    // No lock in DB, or the only lock is this tx's own (see
+                    // above) — this input is free to be locked by the current
+                    // transaction.
                 }
             }
         }
