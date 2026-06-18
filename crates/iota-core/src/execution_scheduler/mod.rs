@@ -27,28 +27,46 @@ pub(crate) mod execution_scheduler_impl;
 mod overload_tracker;
 pub(crate) mod transaction_manager;
 
+/// Timing statistics for a pending transaction in the execution scheduler.
+///
+/// It tracks when a transaction was enqueued and when it became ready for
+/// execution and it is used for latency metrics.
+///
+/// The legacy name (in the certificate era) was `PendingCertificateStats`.
+/// It is renamed to `PendingTransactionStats` because this type now (in the
+/// certificate-less era) covers more consensus transaction kinds, not just
+/// certificates. The renaming is safe and backward-compatible since this is
+/// a fully internal type.
 #[derive(Clone, Debug)]
-pub struct PendingCertificateStats {
-    /// The time this certificate enters the execution scheduler.
+pub struct PendingTransactionStats {
+    /// The time this transaction enters the execution scheduler.
     #[cfg(test)]
     pub enqueue_time: Instant,
-    /// The time this certificate becomes ready for execution.
+    /// The time this transaction becomes ready for execution.
     pub ready_time: Option<Instant>,
 }
 
+/// A transaction that is waiting in the execution scheduler for its input
+/// objects to become available before it can be sent to the execution driver.
+///
+/// The legacy name (in the certificate era) was `PendingCertificate`.
+/// It is renamed to `PendingTransaction` because this type now (in the
+/// certificate-less era) covers more consensus transaction kinds, not just
+/// certificates. The renaming is safe and backward-compatible since this is
+/// a fully internal type.
 #[derive(Debug)]
-pub struct PendingCertificate {
-    /// Certified transaction to be executed.
-    pub certificate: VerifiedExecutableTransaction,
+pub struct PendingTransaction {
+    /// The transaction to be executed.
+    pub transaction: VerifiedExecutableTransaction,
     /// When executing from checkpoint, the certified effects digest is
     /// provided, so that forks can be detected prior to committing the
     /// transaction.
     pub expected_effects_digest: Option<TransactionEffectsDigest>,
-    /// The input objects this certificate is waiting for to become available in
+    /// The input objects this transaction is waiting for to become available in
     /// order to be executed. Only used by `TransactionManager`.
     pub waiting_input_objects: BTreeSet<InputKey>,
     /// Stats about this transaction.
-    pub stats: PendingCertificateStats,
+    pub stats: PendingTransactionStats,
     /// Held while the transaction is executing, to keep the
     /// executing-certificates gauge accurate. Only set by
     /// `ExecutionScheduler`.
@@ -130,7 +148,7 @@ impl ExecutionSchedulerWrapper {
     pub fn new(
         object_cache_read: Arc<dyn ObjectCacheRead>,
         transaction_cache_read: Arc<dyn TransactionCacheRead>,
-        tx_ready_certificates: UnboundedSender<PendingCertificate>,
+        tx_ready_transactions: UnboundedSender<PendingTransaction>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
         metrics: Arc<AuthorityMetrics>,
     ) -> Self {
@@ -143,7 +161,7 @@ impl ExecutionSchedulerWrapper {
             Self::ExecutionScheduler(ExecutionScheduler::new(
                 object_cache_read,
                 transaction_cache_read,
-                tx_ready_certificates,
+                tx_ready_transactions,
                 metrics,
             ))
         } else {
@@ -151,7 +169,7 @@ impl ExecutionSchedulerWrapper {
                 object_cache_read,
                 transaction_cache_read,
                 epoch_store,
-                tx_ready_certificates,
+                tx_ready_transactions,
                 metrics,
             ))
         }

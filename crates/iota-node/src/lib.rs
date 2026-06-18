@@ -1304,7 +1304,6 @@ impl IotaNode {
                 IotaTxValidator::new(
                     epoch_store.clone(),
                     checkpoint_service.clone(),
-                    state.transaction_manager().clone(),
                     iota_tx_validator_metrics.clone(),
                 ),
             )
