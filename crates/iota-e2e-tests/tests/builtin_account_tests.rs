@@ -24,37 +24,38 @@
 use std::{future::Future, net::SocketAddr, pin::Pin};
 
 use fastcrypto::{
-    ed25519::Ed25519KeyPair,
-    secp256k1::Secp256k1KeyPair,
-    secp256r1::Secp256r1KeyPair,
-    traits::{KeyPair as FastcryptoKeyPair, ToFromBytes},
+    ed25519::Ed25519KeyPair, secp256k1::Secp256k1KeyPair, secp256r1::Secp256r1KeyPair,
+    traits::KeyPair as FastcryptoKeyPair,
 };
-use iota_core::authority_client::AuthorityAPI;
+use iota_core::authority_client::validator::ValidatorAPI;
 use iota_macros::sim_test;
 use iota_protocol_config::ProtocolConfig;
-use iota_sdk_types::crypto::{Intent, IntentMessage};
+use iota_sdk_types::{
+    Address, ExecutionError, ExecutionStatus, Identifier, MoveLocation, ObjectId, Owner,
+    ProgrammableTransaction, SimpleSignature,
+    crypto::{Intent, IntentMessage, PublicKey as SdkPublicKey, UserSignature},
+};
 use iota_test_transaction_builder::TestTransactionBuilder;
 use iota_types::{
-    IOTA_CLAIM_REGISTRY_OBJECT_ID, IOTA_FRAMEWORK_PACKAGE_ID,
-    base_types::{IotaAddress, ObjectID, ObjectRef},
-    crypto::{IotaKeyPair, PublicKey, Signature as IotaSignature, SignatureScheme},
-    effects::{TransactionEffects, TransactionEffectsAPI},
+    base_types::ObjectRef,
+    crypto::{
+        EncodeDecodeBase64, IotaKeyPair, PublicKey, Signature as IotaSignature, SignatureScheme,
+    },
+    effects::{TransactionEffects, TransactionEffectsAPI, TransactionEffectsExt},
     error::IotaError,
-    execution_status::{ExecutionFailureStatus, ExecutionStatus},
     messages_grpc::HandleTransactionResponse,
     move_authenticator::MoveAuthenticator,
-    multisig::{MultiSig, MultiSigPublicKey},
-    object::{Object, Owner},
-    passkey_authenticator::{PasskeyAuthenticator, to_signing_message},
+    multisig::{MultiSig, MultiSigPublicKey, MultisigMember},
+    object::Object,
+    passkey_authenticator::PasskeyAuthenticator,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     signature::GenericSignature,
     storage::WriteKind,
     transaction::{
-        CallArg, ObjectArg, ProgrammableTransaction,
-        TEST_ONLY_GAS_UNIT_FOR_HEAVY_COMPUTATION_STORAGE, Transaction, TransactionData,
+        CallArg, SharedObjectRef, TEST_ONLY_GAS_UNIT_FOR_HEAVY_COMPUTATION_STORAGE, Transaction,
+        TransactionData, TransactionDataAPI,
     },
 };
-use move_core_types::identifier::Identifier;
 use p256::pkcs8::DecodePublicKey;
 use passkey_authenticator::{Authenticator as PasskeyClient, UserCheck, UserValidationMethod};
 use passkey_client::Client as WebAuthnClient;
@@ -232,9 +233,8 @@ async fn test_explicit_rotated_pk_old_key_fails() -> Result<(), anyhow::Error> {
 
     // (c) New key wrapped in a hand-crafted MoveAuthenticator targeting the
     // account object: succeeds.
-    let wire_bytes = GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, &new_key))
-        .as_ref()
-        .to_vec();
+    let wire_bytes =
+        GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, &new_key)).to_bytes();
     let account = shared_account_arg(&test_cluster, sender, false).await;
     let auth_sig = builtin_move_authenticator(&wire_bytes, account)?;
     execute_and_assert_success(
@@ -345,7 +345,7 @@ async fn test_sponsored_tx_implicit_sender_and_sponsor() -> Result<(), anyhow::E
     let rgp = test_cluster.get_reference_gas_price().await;
     let pt = {
         let mut builder = ProgrammableTransactionBuilder::new();
-        builder.pay_iota(vec![IotaAddress::ZERO], vec![1])?;
+        builder.pay_iota(vec![Address::ZERO], vec![1])?;
         builder.finish()
     };
     let tx_data = TransactionData::new_programmable_allow_sponsor(
@@ -390,7 +390,7 @@ async fn test_sponsored_tx_sponsor_explicit_rotated_fails() -> Result<(), anyhow
     let rgp = test_cluster.get_reference_gas_price().await;
     let pt = {
         let mut builder = ProgrammableTransactionBuilder::new();
-        builder.pay_iota(vec![IotaAddress::ZERO], vec![1])?;
+        builder.pay_iota(vec![Address::ZERO], vec![1])?;
         builder.finish()
     };
     let tx_data = TransactionData::new_programmable_allow_sponsor(
@@ -550,21 +550,21 @@ async fn test_builtin_auth_builder_v1_fresh_account() -> Result<(), anyhow::Erro
         let mut builder = ProgrammableTransactionBuilder::new();
         let pk_bytes_arg = builder.pure(prefixed_pk_of(&kp))?;
         let pk = builder.programmable_move_call(
-            IOTA_FRAMEWORK_PACKAGE_ID,
+            ObjectId::FRAMEWORK,
             ident(PUBLIC_KEY_MODULE),
             ident("from_prefixed_bytes"),
             vec![],
             vec![pk_bytes_arg],
         );
         let account_builder = builder.programmable_move_call(
-            IOTA_FRAMEWORK_PACKAGE_ID,
+            ObjectId::FRAMEWORK,
             ident(SMART_ACCOUNT_MODULE),
             ident("builtin_auth_builder_v1"),
             vec![],
             vec![pk],
         );
         builder.programmable_move_call(
-            IOTA_FRAMEWORK_PACKAGE_ID,
+            ObjectId::FRAMEWORK,
             ident(SMART_ACCOUNT_MODULE),
             ident("build_v1"),
             vec![],
@@ -581,10 +581,10 @@ async fn test_builtin_auth_builder_v1_fresh_account() -> Result<(), anyhow::Erro
     let effects = execute_and_assert_success(&test_cluster, tx).await?;
 
     let account_ref = created_shared_object(&effects);
-    let account_address: IotaAddress = account_ref.0.into();
+    let account_address: Address = account_ref.object_id.into();
     assert_ne!(
         account_address,
-        IotaAddress::from(&kp.public()),
+        Address::from(&kp.public()),
         "builtin_auth_builder_v1 must create the account at a fresh object ID"
     );
 
@@ -607,14 +607,13 @@ async fn test_builtin_auth_builder_v1_fresh_account() -> Result<(), anyhow::Erro
 
     // A hand-crafted MoveAuthenticator wrapping the key's wire signature
     // unlocks it.
-    let wire_bytes = GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, &kp))
-        .as_ref()
-        .to_vec();
-    let account = ObjectArg::SharedObject {
-        id: account_ref.0,
-        initial_shared_version: account_ref.1,
-        mutable: false,
-    };
+    let wire_bytes =
+        GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, &kp)).to_bytes();
+    let account = CallArg::Shared(SharedObjectRef::new(
+        account_ref.object_id,
+        account_ref.version,
+        false,
+    ));
     let auth_sig = builtin_move_authenticator(&wire_bytes, account)?;
     execute_and_assert_success(
         &test_cluster,
@@ -645,7 +644,7 @@ enum Actor {
         multisig_pk: MultiSigPublicKey,
     },
     Passkey {
-        address: IotaAddress,
+        address: Address,
         prefixed_pk: Vec<u8>,
         signer: PasskeySigner,
     },
@@ -681,16 +680,20 @@ impl Actor {
                 [seed.wrapping_add(2); 32],
             ))),
         ];
-        let multisig_pk =
-            MultiSigPublicKey::new(keys.iter().map(|k| k.public()).collect(), vec![1, 1, 1], 2)
-                .expect("valid multisig committee");
+        let multisig_pk = MultiSigPublicKey::new(
+            keys.iter()
+                .map(|k| MultisigMember::new(to_sdk_public_key(&k.public()), 1))
+                .collect(),
+            2,
+        )
+        .expect("valid multisig committee");
         Self::MultiSig { keys, multisig_pk }
     }
 
-    fn address(&self) -> IotaAddress {
+    fn address(&self) -> Address {
         match self {
-            Self::Simple(kp) => IotaAddress::from(&kp.public()),
-            Self::MultiSig { multisig_pk, .. } => IotaAddress::from(multisig_pk),
+            Self::Simple(kp) => Address::from(&kp.public()),
+            Self::MultiSig { multisig_pk, .. } => Address::from(multisig_pk),
             Self::Passkey { address, .. } => *address,
         }
     }
@@ -732,13 +735,15 @@ impl Actor {
                 // Sign with the first `threshold` keys.
                 let sigs = keys
                     .iter()
-                    .take(*multisig_pk.threshold() as usize)
+                    .take(multisig_pk.threshold() as usize)
                     .map(|kp| {
-                        GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, kp))
+                        let sig =
+                            GenericSignature::Signature(IotaSignature::new_secure(&intent_msg, kp));
+                        UserSignature::try_from(sig).expect("simple signature is convertible")
                     })
                     .collect();
                 GenericSignature::MultiSig(
-                    MultiSig::combine(sigs, multisig_pk.clone())
+                    MultiSig::new(sigs, multisig_pk.clone())
                         .expect("multisig combination must succeed"),
                 )
             }
@@ -764,7 +769,13 @@ fn ident(name: &str) -> Identifier {
     Identifier::new(name).expect("valid identifier")
 }
 
-async fn fund(test_cluster: &TestCluster, address: IotaAddress) -> ObjectRef {
+/// Converts a node-internal [`PublicKey`] into the SDK public key used by the
+/// multisig committee types.
+fn to_sdk_public_key(pk: &PublicKey) -> SdkPublicKey {
+    SdkPublicKey::from_base64(&pk.encode_base64()).expect("valid public key")
+}
+
+async fn fund(test_cluster: &TestCluster, address: Address) -> ObjectRef {
     let rgp = test_cluster.get_reference_gas_price().await;
     test_cluster
         .fund_address_and_return_gas(rgp, Some(GAS_AMOUNT), address)
@@ -774,19 +785,19 @@ async fn fund(test_cluster: &TestCluster, address: IotaAddress) -> ObjectRef {
 /// Builds a minimal transfer `TransactionData` for `sender`.
 async fn transfer_tx_data(
     test_cluster: &TestCluster,
-    sender: IotaAddress,
+    sender: Address,
     gas: ObjectRef,
 ) -> TransactionData {
     let rgp = test_cluster.get_reference_gas_price().await;
     TestTransactionBuilder::new(sender, gas, rgp)
-        .transfer_iota(Some(1), IotaAddress::ZERO)
+        .transfer_iota(Some(1), Address::ZERO)
         .build()
 }
 
 /// Builds a `TransactionData` running `pt` with `sender`'s gas.
 async fn ptb_tx_data(
     test_cluster: &TestCluster,
-    sender: IotaAddress,
+    sender: Address,
     gas: ObjectRef,
     pt: ProgrammableTransaction,
 ) -> TransactionData {
@@ -798,66 +809,62 @@ async fn ptb_tx_data(
 
 /// Returns the object at the built-in account ID derived from `address`, if
 /// any.
-async fn account_object(test_cluster: &TestCluster, address: IotaAddress) -> Option<Object> {
+async fn account_object(test_cluster: &TestCluster, address: Address) -> Option<Object> {
     test_cluster
-        .get_object_from_fullnode_store(&ObjectID::from(address))
+        .get_object_from_fullnode_store(&ObjectId::from(address))
         .await
 }
 
 /// The genesis `ClaimRegistry` shared object as a mutable PTB input.
-async fn claim_registry_arg(test_cluster: &TestCluster) -> ObjectArg {
+async fn claim_registry_arg(test_cluster: &TestCluster) -> CallArg {
     let registry = test_cluster
-        .get_object_from_fullnode_store(&IOTA_CLAIM_REGISTRY_OBJECT_ID)
+        .get_object_from_fullnode_store(&ObjectId::CLAIM_REGISTRY)
         .await
         .expect("ClaimRegistry must exist at genesis");
     let initial_shared_version = match &registry.owner {
-        Owner::Shared {
-            initial_shared_version,
-        } => *initial_shared_version,
+        Owner::Shared(initial_shared_version) => *initial_shared_version,
         owner => panic!("ClaimRegistry must be shared, found {owner:?}"),
     };
-    ObjectArg::SharedObject {
-        id: IOTA_CLAIM_REGISTRY_OBJECT_ID,
+    CallArg::Shared(SharedObjectRef::new(
+        ObjectId::CLAIM_REGISTRY,
         initial_shared_version,
-        mutable: true,
-    }
+        true,
+    ))
 }
 
 /// The shared `SmartAccount` object at `address` as a PTB / authenticator
 /// input.
 async fn shared_account_arg(
     test_cluster: &TestCluster,
-    address: IotaAddress,
+    address: Address,
     mutable: bool,
-) -> ObjectArg {
+) -> CallArg {
     let account = account_object(test_cluster, address)
         .await
         .expect("SmartAccount must exist");
     let initial_shared_version = match &account.owner {
-        Owner::Shared {
-            initial_shared_version,
-        } => *initial_shared_version,
+        Owner::Shared(initial_shared_version) => *initial_shared_version,
         owner => panic!("SmartAccount must be shared, found {owner:?}"),
     };
-    ObjectArg::SharedObject {
-        id: ObjectID::from(address),
+    CallArg::Shared(SharedObjectRef::new(
+        ObjectId::from(address),
         initial_shared_version,
         mutable,
-    }
+    ))
 }
 
 /// PTB claiming the sender's own address as a `SmartAccount`:
 /// `public_key::from_prefixed_bytes` -> `smart_account::claim_builder_v1` ->
 /// `smart_account::{build_v1|build_immutable_v1}`.
 fn claim_ptb(
-    registry: ObjectArg,
+    registry: CallArg,
     prefixed_pk: Vec<u8>,
     immutable: bool,
 ) -> anyhow::Result<ProgrammableTransaction> {
     let mut builder = ProgrammableTransactionBuilder::new();
     let pk_bytes_arg = builder.pure(prefixed_pk)?;
     let pk = builder.programmable_move_call(
-        IOTA_FRAMEWORK_PACKAGE_ID,
+        ObjectId::FRAMEWORK,
         ident(PUBLIC_KEY_MODULE),
         ident("from_prefixed_bytes"),
         vec![],
@@ -865,14 +872,14 @@ fn claim_ptb(
     );
     let registry_arg = builder.obj(registry)?;
     let account_builder = builder.programmable_move_call(
-        IOTA_FRAMEWORK_PACKAGE_ID,
+        ObjectId::FRAMEWORK,
         ident(SMART_ACCOUNT_MODULE),
         ident("claim_builder_v1"),
         vec![],
         vec![registry_arg, pk],
     );
     builder.programmable_move_call(
-        IOTA_FRAMEWORK_PACKAGE_ID,
+        ObjectId::FRAMEWORK,
         ident(SMART_ACCOUNT_MODULE),
         ident(if immutable {
             "build_immutable_v1"
@@ -889,13 +896,13 @@ fn claim_ptb(
 /// `new_prefixed_pk`. The returned previous `PublicKey` is copy+drop, so it is
 /// safe to leave unconsumed.
 fn rotate_pk_ptb(
-    account: ObjectArg,
+    account: CallArg,
     new_prefixed_pk: Vec<u8>,
 ) -> anyhow::Result<ProgrammableTransaction> {
     let mut builder = ProgrammableTransactionBuilder::new();
     let pk_bytes_arg = builder.pure(new_prefixed_pk)?;
     let pk = builder.programmable_move_call(
-        IOTA_FRAMEWORK_PACKAGE_ID,
+        ObjectId::FRAMEWORK,
         ident(PUBLIC_KEY_MODULE),
         ident("from_prefixed_bytes"),
         vec![],
@@ -903,7 +910,7 @@ fn rotate_pk_ptb(
     );
     let account_arg = builder.obj(account)?;
     builder.programmable_move_call(
-        IOTA_FRAMEWORK_PACKAGE_ID,
+        ObjectId::FRAMEWORK,
         ident(SMART_ACCOUNT_MODULE),
         ident("rotate_builtin_auth_public_key"),
         vec![],
@@ -913,11 +920,11 @@ fn rotate_pk_ptb(
 }
 
 /// PTB detaching the built-in authenticator public key from `account`.
-fn detach_pk_ptb(account: ObjectArg) -> anyhow::Result<ProgrammableTransaction> {
+fn detach_pk_ptb(account: CallArg) -> anyhow::Result<ProgrammableTransaction> {
     let mut builder = ProgrammableTransactionBuilder::new();
     let account_arg = builder.obj(account)?;
     builder.programmable_move_call(
-        IOTA_FRAMEWORK_PACKAGE_ID,
+        ObjectId::FRAMEWORK,
         ident(SMART_ACCOUNT_MODULE),
         ident("detach_builtin_auth_public_key"),
         vec![],
@@ -930,13 +937,13 @@ fn detach_pk_ptb(account: ObjectArg) -> anyhow::Result<ProgrammableTransaction> 
 /// that authenticates against `account`.
 fn builtin_move_authenticator(
     wire_bytes: &[u8],
-    account: ObjectArg,
+    account: CallArg,
 ) -> anyhow::Result<GenericSignature> {
     Ok(GenericSignature::MoveAuthenticator(
         MoveAuthenticator::new_v1(
             vec![CallArg::Pure(bcs::to_bytes(&wire_bytes.to_vec())?)],
             vec![],
-            CallArg::Object(account),
+            account,
         ),
     ))
 }
@@ -950,7 +957,7 @@ async fn execute_and_assert_success(
         .execute_transaction_return_raw_effects(tx)
         .await?;
     assert!(
-        effects.status().is_ok(),
+        effects.status().is_success(),
         "transaction failed: {:?}",
         effects.status()
     );
@@ -972,8 +979,8 @@ async fn execute_and_assert_claim_registry_abort(
     assert!(
         matches!(
             error,
-            ExecutionFailureStatus::MoveAbort(location, _)
-                if location.module.name().as_str() == "claim_registry"
+            ExecutionError::MoveAbort { location: MoveLocation { module, .. }, .. }
+                if module.as_str() == "claim_registry"
         ),
         "expected a claim_registry abort, got {error:?}"
     );
@@ -1004,7 +1011,7 @@ fn created_shared_object(effects: &TransactionEffects) -> ObjectRef {
         .all_changed_objects()
         .iter()
         .find_map(|change| match change {
-            (obj_ref, Owner::Shared { .. }, WriteKind::Create) => Some(*obj_ref),
+            (obj_ref, Owner::Shared(_), WriteKind::Create) => Some(*obj_ref),
             _ => None,
         })
         .expect("expected a created shared object")
@@ -1072,8 +1079,8 @@ async fn claim_account(
     let account = account_object(test_cluster, sender)
         .await
         .expect("SmartAccount must exist at the sender address after the claim");
-    let account_ref = account.compute_object_reference();
-    assert_eq!(account_ref.0, ObjectID::from(sender));
+    let account_ref = account.object_ref();
+    assert_eq!(account_ref.object_id, ObjectId::from(sender));
     if immutable {
         assert!(
             matches!(account.owner, Owner::Immutable),
@@ -1082,7 +1089,7 @@ async fn claim_account(
         );
     } else {
         assert!(
-            matches!(account.owner, Owner::Shared { .. }),
+            matches!(account.owner, Owner::Shared(_)),
             "expected a shared account, found {:?}",
             account.owner
         );
@@ -1235,7 +1242,7 @@ mod passkey_util {
     macro_rules! passkey_sign {
         ($client:expr, $origin:expr, $prefixed_pk:expr, $tx_data:expr) => {{
             let intent_msg = IntentMessage::new(Intent::iota_transaction(), $tx_data.clone());
-            let challenge: Bytes = to_signing_message(&intent_msg).to_vec().into();
+            let challenge: Bytes = intent_msg.signing_digest().as_bytes().to_vec().into();
 
             let request = CredentialRequestOptions {
                 public_key: PublicKeyCredentialRequestOptions {
@@ -1266,10 +1273,10 @@ mod passkey_util {
             user_sig_bytes.extend_from_slice(&$prefixed_pk[1..]);
 
             GenericSignature::PasskeyAuthenticator(
-                PasskeyAuthenticator::new_for_testing(
+                PasskeyAuthenticator::new(
                     auth_cred.response.authenticator_data.as_slice().to_vec(),
                     String::from_utf8_lossy(auth_cred.response.client_data_json.as_slice()).into(),
-                    IotaSignature::from_bytes(&user_sig_bytes).expect("invalid wire signature"),
+                    SimpleSignature::from_bytes(&user_sig_bytes).expect("invalid wire signature"),
                 )
                 .expect("invalid passkey authenticator"),
             )
@@ -1287,7 +1294,7 @@ mod passkey_util {
             let pk =
                 PublicKey::try_from_bytes(SignatureScheme::PasskeyAuthenticator, &prefixed_pk[1..])
                     .expect("valid passkey public key");
-            let address = IotaAddress::from(&pk);
+            let address = Address::from(&pk);
 
             // An async-aware mutex: the client is mutably borrowed across the
             // WebAuthn `authenticate` await inside `passkey_sign!`.

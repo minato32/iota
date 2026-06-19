@@ -65,9 +65,7 @@ use iota_types::{
             AuthenticatorFunctionRefForExecution, AuthenticatorFunctionRefForSigning,
             AuthenticatorFunctionRefV1, extract_auth_fun_refs,
         },
-        builtin_authenticator_functions::{
-            self, PreloadedBuiltinAuthenticatorData, PublicKeyFieldName,
-        },
+        builtin_authenticator_functions::{self, PreloadedBuiltinAuthenticatorData},
     },
     auth_context::AuthContextData,
     base_types::{
@@ -75,10 +73,7 @@ use iota_types::{
         VersionNumber,
     },
     committee::{Committee, EpochId, ProtocolVersion},
-    crypto::{
-        AuthorityPublicKey, AuthoritySignInfo, AuthoritySignature, IotaSignature, RandomnessRound,
-        Signature, Signer,
-    },
+    crypto::{AuthorityPublicKey, AuthoritySignInfo, AuthoritySignature, Signer},
     deny_list_v1::check_coin_deny_list_v1,
     digests::{ChainIdentifier, Digest, ObjectDigest, TransactionDigest, TransactionEffectsDigest},
     dynamic_field::{self, DynamicFieldInfo, DynamicFieldName, Field, visitor as DFV},
@@ -1063,7 +1058,8 @@ impl AuthorityState {
                 &auth_inputs,
             )?;
 
-        // Get the checked input objects for each move authenticator.
+        // Get the input objects for the authenticators, if there are
+        // `MoveAuthenticator`s.
         let per_authenticator_checked_input_objects = per_authenticator_checked_inputs
             .iter()
             .map(|i| &i.0)
@@ -5702,8 +5698,32 @@ impl AuthorityState {
         Ok(new_epoch_store)
     }
 
-    /// Checks if `authenticator` unlocks a valid Move account and returns the
-    /// account-related pre-loaded data.
+    /// First, it branches out depending on wether the account is implicit or
+    /// explicit, i.e., if the implicit_signature option param is Some or None.
+    ///
+    /// If the implicit_signature is Some here it simply returns the
+    /// authenticator function ref for execution, which is a built-in
+    /// authenticator function ref. No checks needed, because it is assumed that
+    /// the caller has crafted the move authenticator.
+    ///
+    /// If the implicit signature is not present, it means that the account is
+    /// explicit. In this case, i.e., having an object representing the account
+    /// on chain, it verifies if the account object specified in the Move
+    /// authenticator is valid:
+    /// - account object with the specified id exists, i.e., not deleted or in a
+    ///   canceled transaction
+    /// - account object id is equal to the tx sender
+    /// - account object is either shared or immutable
+    /// - account object version is equal to the one specified in the
+    ///   authenticator (if any)
+    /// - account object digest is equal to the one specified in the
+    ///   authenticator (if any)
+    /// - account object has the authenticator function ref dynamic field
+    ///
+    /// If the account object is valid, it returns the authenticator function
+    /// ref for execution. Before returning the authenticator function ref, if
+    /// this function is a built-in authenticator, it also loads the public
+    /// key dynamic field.
     fn check_move_account(
         &self,
         auth_account_object_id: ObjectId,
@@ -5714,30 +5734,18 @@ impl AuthorityState {
         implicit_signature: Option<&GenericSignature>,
     ) -> IotaResult<AuthenticatorFunctionRefForExecution> {
         if let Some(implicit_signature) = implicit_signature {
-            // Case for an account with no object on chain
-            let (authenticator_function_ref, public_key) = match implicit_signature {
-                GenericSignature::Signature(sig) => match sig {
-                    Signature::Ed25519IotaSignature(ed25519_iota_signature) => (
-                        iota_authenticator_functions::ed25519_authenticator_function_ref_v1(),
-                        ed25519_iota_signature.public_key_bytes(),
-                    ),
-                    Signature::Secp256k1IotaSignature(secp256k1_iota_signature) => (
-                        iota_authenticator_functions::secp256k1_authenticator_function_ref_v1(),
-                        secp256k1_iota_signature.public_key_bytes(),
-                    ),
-                    Signature::Secp256r1IotaSignature(secp256r1_iota_signature) => (
-                        iota_authenticator_functions::secp256r1_authenticator_function_ref_v1(),
-                        secp256r1_iota_signature.public_key_bytes(),
-                    ),
-                },
-                GenericSignature::PasskeyAuthenticator(_p_sig) => todo!(),
-                GenericSignature::MultiSig(_m_sig) => todo!(),
-                _ => unreachable!("unsupported signature type for implicit signature"),
-            };
+            // Case for an account with NO object on-chain
+            let builtin_authenticator_data =
+                PreloadedBuiltinAuthenticatorData::try_from(implicit_signature)?;
+            let authenticator_function_ref =
+                builtin_authenticator_functions::builtin_authenticator_function_ref_for_scheme(
+                    builtin_authenticator_data.expected_scheme,
+                )
+                .expect("PreloadedBuiltinAuthenticatorData only yields built-in schemes");
 
             Ok(AuthenticatorFunctionRefForExecution::new_v1(
                 authenticator_function_ref,
-                Some(public_key.to_vec()),
+                Some(builtin_authenticator_data),
                 vec![],
             ))
         } else {
@@ -5764,12 +5772,12 @@ impl AuthorityState {
             let account_object_addr = Address::from(auth_account_object_id);
 
             fp_ensure!(
-            signer == &account_object_addr,
-            UserInputError::IncorrectUserSignature {
-                error: format!("Move authenticator is trying to unlock {account_object_addr:?}, but given signer address is {signer:?}")
-            }
-            .into()
-        );
+                signer == &account_object_addr,
+                UserInputError::IncorrectUserSignature {
+                    error: format!("Move authenticator is trying to unlock {account_object_addr:?}, but given signer address is {signer:?}")
+                }
+                .into()
+            );
 
             fp_ensure!(
                 account_object.is_shared() || account_object.is_immutable(),
@@ -5820,51 +5828,67 @@ impl AuthorityState {
                 account_object_id: auth_account_object_id,
             })?;
 
-            let authenticator_function_ref_field = self
+            let authenticator_function_ref_field_obj_opt = self
                 .get_object_cache_reader()
                 .try_find_object_lt_or_eq_version(
                     authenticator_function_ref_field_id,
                     auth_account_object_seq_number,
                 )?;
 
-            if let Some(authenticator_function_ref_field_obj) = authenticator_function_ref_field {
+            if let Some(authenticator_function_ref_field_obj) =
+                authenticator_function_ref_field_obj_opt
+            {
                 let field_move_object = authenticator_function_ref_field_obj
                     .data
-                    .try_as_move()
+                    .as_struct_opt()
                     .expect("dynamic field should never be a package object");
 
-                let field: Field<AuthenticatorFunctionRefV1Key, AuthenticatorFunctionRefV1> =
-                    field_move_object.to_rust().ok_or(
-                        UserInputError::InvalidAuthenticatorFunctionRefField {
-                            account_object_id: auth_account_object_id,
-                        },
-                    )?;
+                let authenticator_function_ref_field: Field<
+                    AuthenticatorFunctionRefV1Key,
+                    AuthenticatorFunctionRefV1,
+                > = field_move_object.to_rust().map_err(|_| {
+                    UserInputError::InvalidAuthenticatorFunctionRefField {
+                        account_object_id: auth_account_object_id,
+                    }
+                })?;
 
                 // For built-in authenticators, also load the public key dynamic field so
                 // the executor can verify the signature without running Move VM.
-                let (public_key, public_key_loaded_object) =
-                    if iota_authenticator_functions::builtin_signature_scheme(&field.value)
-                        .is_some()
+                let (builtin_authenticator_data, public_key_loaded_object) =
+                    if let Some(expected_scheme) =
+                        builtin_authenticator_functions::resolve_builtin_signature_scheme(
+                            &authenticator_function_ref_field.value,
+                        )
                     {
-                        match self.load_public_key_for_builtin_authenticator(
-                            auth_account_object_id,
-                            auth_account_object_seq_number,
-                        ) {
-                            Ok((object_id, Some((public_key, loaded_object)))) => {
-                                Ok((Some(public_key), Some((object_id, loaded_object))))
-                            }
-                            Ok((object_id, None)) => {
-                                Err(UserInputError::AccountPublicKeyNotFound {
-                                    public_key_id: object_id,
-                                    account_object_id: auth_account_object_id,
-                                    account_object_version: auth_account_object_seq_number,
-                                })
-                            }
-                            Err(e) => return Err(e),
-                        }
+                        let (public_key_field_id, loaded_data) =
+                            builtin_authenticator_functions::load_builtin_public_key(
+                                auth_account_object_id,
+                                |public_key_field_id| {
+                                    self.get_object_cache_reader()
+                                        .try_find_object_lt_or_eq_version(
+                                            public_key_field_id,
+                                            auth_account_object_seq_number,
+                                        )
+                                },
+                            )?;
+
+                        let (public_key, public_key_loaded_metadata) =
+                            loaded_data.ok_or(UserInputError::AccountPublicKeyNotFound {
+                                public_key_id: public_key_field_id,
+                                account_object_id: auth_account_object_id,
+                                account_object_version: auth_account_object_seq_number,
+                            })?;
+
+                        (
+                            Some(PreloadedBuiltinAuthenticatorData {
+                                expected_scheme,
+                                public_key,
+                            }),
+                            Some((public_key_field_id, public_key_loaded_metadata)),
+                        )
                     } else {
-                        Ok((None, None))
-                    }?;
+                        (None, None)
+                    };
 
                 let mut loaded_objects = vec![(
                     authenticator_function_ref_field_id,
@@ -5876,8 +5900,8 @@ impl AuthorityState {
                 }
 
                 let auth_ref = AuthenticatorFunctionRefForExecution::new_v1(
-                    field.value,
-                    public_key,
+                    authenticator_function_ref_field.value,
+                    builtin_authenticator_data,
                     loaded_objects,
                 );
 
@@ -5890,48 +5914,6 @@ impl AuthorityState {
                 }
                 .into())
             }
-        }
-    }
-
-    /// Loads the `PublicKeyFieldName` dynamic field from the account object
-    /// for built-in authenticators. Returns the field object id, public key
-    /// bytes, and object metadata. Returns `Ok((id, None))` if the field is
-    /// absent.
-    #[allow(clippy::type_complexity)]
-    fn load_public_key_for_builtin_authenticator(
-        &self,
-        account_object_id: ObjectId,
-        account_object_seq_number: SequenceNumber,
-    ) -> IotaResult<(ObjectId, Option<(Vec<u8>, DynamicallyLoadedObjectMetadata)>)> {
-        let public_key_field_id = dynamic_field::derive_dynamic_field_id(
-            account_object_id,
-            &PublicKeyFieldName::tag().into(),
-            &PublicKeyFieldName::default().to_bcs_bytes(),
-        )
-        .map_err(|_| UserInputError::UnableToGetAccountPublicKeyId { account_object_id })?;
-
-        let public_key_field_obj = self
-            .get_object_cache_reader()
-            .try_find_object_lt_or_eq_version(public_key_field_id, account_object_seq_number)?;
-
-        if let Some(public_key_field_obj) = public_key_field_obj {
-            let loaded_object_metadata =
-                DynamicallyLoadedObjectMetadata::from(&public_key_field_obj);
-
-            let move_obj = public_key_field_obj
-                .data
-                .as_struct_opt()
-                .expect("dynamic field should never be a package object");
-            let field: Field<PublicKeyFieldName, Vec<u8>> = move_obj
-                .to_rust()
-                .map_err(|_| UserInputError::InvalidAccountPublicKeyField { account_object_id })?;
-
-            Ok((
-                public_key_field_id,
-                Some((field.value, loaded_object_metadata)),
-            ))
-        } else {
-            Ok((public_key_field_id, None))
         }
     }
 
@@ -6001,8 +5983,6 @@ impl AuthorityState {
             })
         };
 
-        // TODO: this should be split into flag || signature || pub_key and then only
-        // the signature must be part of the pure value
         // Serialize the original signature so the authenticator can inspect it.
         let sig_bytes: Vec<u8> = bcs::to_bytes(signature).map_err(|e| {
             IotaError::Unknown(format!(

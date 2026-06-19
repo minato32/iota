@@ -2170,10 +2170,7 @@ impl SenderSignedData {
             .iter()
             .filter_map(|sig| match sig {
                 GenericSignature::MoveAuthenticator(_) => None,
-                _ => Some(
-                    sig.try_into()
-                        .map(|signer: Address| ObjectId::from(signer)),
-                ),
+                _ => Some(sig.try_into().map(|signer: Address| ObjectId::from(signer))),
             })
             .collect::<IotaResult<Vec<_>>>()
     }

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use fastcrypto::{
+    encoding::{Encoding as _, Hex},
     hash::{HashFunction, Sha256},
     rsa::{Base64UrlUnpadded, Encoding as _},
+    traits::ToFromBytes as _,
 };
 use iota_protocol_config::ProtocolConfig;
 use iota_sdk_crypto::{
@@ -564,7 +566,7 @@ fn assert_matches_move_vector(
     );
     assert_eq!(
         data.public_key.address().unwrap(),
-        expected_addr.parse::<IotaAddress>().unwrap()
+        expected_addr.parse::<Address>().unwrap()
     );
 }
 
@@ -605,9 +607,13 @@ fn preloaded_data_from_multisig_matches_move_vector() {
     let multisig_pk: MultiSigPublicKey = bcs::from_bytes(&prefixed[1..]).unwrap();
 
     // The single committee member is the Ed25519 test-vector key.
-    let member_sig = signature_with_pk(MOVE_TEST_ED25519_PK);
+    let prefixed_member = Hex::decode(MOVE_TEST_ED25519_PK).unwrap();
+    let mut member_wire = vec![prefixed_member[0]];
+    member_wire.extend([1u8; 64]);
+    member_wire.extend_from_slice(&prefixed_member[1..]);
+    let member_sig = SimpleSignature::from_bytes(&member_wire).unwrap();
     let multisig =
-        GenericSignature::MultiSig(MultiSig::combine(vec![member_sig], multisig_pk).unwrap());
+        GenericSignature::MultiSig(MultiSig::new(vec![member_sig.into()], multisig_pk).unwrap());
 
     assert_matches_move_vector(
         &multisig,
@@ -627,14 +633,14 @@ fn preloaded_data_from_passkey_matches_move_vector() {
     let mut wire = vec![SignatureScheme::Secp256r1.flag()];
     wire.extend([1u8; 64]);
     wire.extend_from_slice(&prefixed[1..]);
-    let user_sig = Signature::from_bytes(&wire).unwrap();
+    let user_sig = SimpleSignature::from_bytes(&wire).unwrap();
 
     let challenge_b64 = Base64UrlUnpadded::encode_string(&[0u8; 32]);
     let client_data_json = format!(
         r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://iota.org","crossOrigin":false}}"#
     );
     let passkey = GenericSignature::PasskeyAuthenticator(
-        PasskeyAuthenticator::new_for_testing(vec![0xAB], client_data_json, user_sig).unwrap(),
+        PasskeyAuthenticator::new(vec![0xAB], client_data_json, user_sig).unwrap(),
     );
 
     assert_matches_move_vector(
@@ -653,7 +659,7 @@ fn preloaded_data_from_signed_keypairs() {
         IotaKeyPair::Secp256k1(get_key_pair_from_rng(&mut rng).1),
         IotaKeyPair::Secp256r1(get_key_pair_from_rng(&mut rng).1),
     ] {
-        let sender = IotaAddress::from(&key_pair.public());
+        let sender = Address::from(&key_pair.public());
         let intent_msg = IntentMessage::new(Intent::iota_transaction(), dummy_tx_data(sender));
         let signature = GenericSignature::Signature(Signature::new_secure(&intent_msg, &key_pair));
 
