@@ -301,23 +301,24 @@ pub async fn validate_and_resolve_conflicts(
             }
 
             match epoch_store.tables()?.get_locked_transaction(obj_ref)? {
-                Some(locked_by) if locked_by != digest => {
-                    debug!(
-                        ?digest,
-                        ?obj_ref,
-                        ?locked_by,
-                        "Transaction conflicts with persistent lock, dropping"
-                    );
-                    conflict = Some(IotaError::ObjectLockConflict {
-                        obj_ref: *obj_ref,
-                        pending_transaction: locked_by,
-                    });
-                    break 'conflict_check;
+                Some(locked_by) => {
+                    if locked_by != digest {
+                        debug!(
+                            ?digest,
+                            ?obj_ref,
+                            ?locked_by,
+                            "Transaction conflicts with persistent lock, dropping"
+                        );
+                        conflict = Some(IotaError::ObjectLockConflict {
+                            obj_ref: *obj_ref,
+                            pending_transaction: locked_by,
+                        });
+                        break 'conflict_check;
+                    }
                 }
-                _ => {
-                    // No lock in DB, or the only lock is this tx's own (see
-                    // above) — this input is free to be locked by the current
-                    // transaction.
+                None => {
+                    // No lock in DB — this input is free to be locked by
+                    // the current transaction.
                 }
             }
         }
@@ -348,10 +349,6 @@ pub async fn validate_and_resolve_conflicts(
         //   - Gas, ownership, `MoveAuthenticator` execution: re-applied in the
         //     execution pipeline (`check_certificate_input` and
         //     `authenticate_then_execute_transaction_to_effects`).
-        //   - User signature: re-verified pre-execution in `prepare_certificate` so a
-        //     Byzantine attestor cannot forge transactions; the failure is reported as
-        //     `IotaError::AttestationInvalidUserSignature` and carries the
-        //     `attestor_index` for future attestor-accountability.
         //
         // The user signature is verified pre-consensus in the block verifier
         // (`IotaTxValidator::validate_transactions`) for both `UserTransactionV1`
@@ -394,17 +391,6 @@ pub async fn validate_and_resolve_conflicts(
                 if e.is_storage_or_epoch_error() {
                     return Err(e);
                 }
-                // The helper performs two distinct steps; surface which one
-                // failed so triage doesn't mistake a stale-attestation input
-                // for an actual deny-list violation.
-                let reason = match &e {
-                    IotaError::UserInput {
-                        error:
-                            UserInputError::CoinTypeGlobalPause { .. }
-                            | UserInputError::AddressDeniedForCoin { .. },
-                    } => "coin deny-list re-check",
-                    _ => "input load (likely stale attestation)",
-                };
                 warn!(
                     ?digest,
                     error = ?e,

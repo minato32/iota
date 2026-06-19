@@ -171,34 +171,6 @@ impl IotaTxValidator {
                     }
                 }
 
-                ConsensusTransactionKind::UserTransactionV2(attested_tx) => {
-                    if !self
-                        .epoch_store
-                        .protocol_config()
-                        .enable_validator_attestation()
-                    {
-                        return Err(IotaError::UnsupportedFeature {
-                            error: "UserTransactionV2 not supported at current protocol version"
-                                .into(),
-                        });
-                    }
-
-                    match &attested_tx.attestation {
-                        Attestation::Validator { .. } => {
-                            // No explicit signature to verify: the attestor's
-                            // identity is bound to the consensus block and
-                            // checked in post_consensus_validation.
-                        }
-                        Attestation::Explicit { .. } => {
-                            // TODO: verify explicit attestor signature against the trusted
-                            // attestor registry (Phase 2).
-                            return Err(IotaError::UnsupportedFeature {
-                                error: "Explicit attestation not yet supported".into(),
-                            });
-                        }
-                    }
-                }
-
                 ConsensusTransactionKind::EndOfPublish(_)
                 | ConsensusTransactionKind::CapabilityNotificationV1(_) => {}
             }
