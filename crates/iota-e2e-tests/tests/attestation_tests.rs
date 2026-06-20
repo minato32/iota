@@ -681,7 +681,7 @@ impl TestEnvironment {
                 if object.is_coin() {
                     coin_id = Some(*object_id);
                     coin_type = object.coin_type_opt().cloned();
-                } else if object.type_().map_or(false, |t| t.is_deny_cap_v1()) {
+                } else if object.type_().is_some_and(|t| t.is_deny_cap_v1()) {
                     deny_cap_id = Some(*object_id);
                 }
             }

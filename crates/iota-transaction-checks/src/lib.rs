@@ -286,51 +286,6 @@ mod checked {
         ))
     }
 
-    /// Checks transaction and Move-authenticator inputs, returning an
-    /// execution-mode gas status plus the checked input objects.
-    #[instrument(level = "trace", skip_all)]
-    pub fn check_transaction_and_move_authenticator_input(
-        transaction: &TransactionData,
-        tx_input_objects: InputObjects,
-        per_authenticator_input_objects: Vec<InputObjects>,
-        authenticator_gas_budget: u64,
-        protocol_config: &ProtocolConfig,
-        reference_gas_price: u64,
-    ) -> IotaResult<(IotaGasStatus, Vec<CheckedInputObjects>, CheckedInputObjects)> {
-        // Check Move authenticator inputs first.
-        per_authenticator_input_objects
-            .iter()
-            .try_for_each(check_move_authenticator_objects)?;
-
-        // Check transaction inputs next.
-        let gas_status = check_transaction_input_inner(
-            protocol_config,
-            reference_gas_price,
-            transaction,
-            &tx_input_objects,
-            &[],
-            authenticator_gas_budget,
-            true, // execution mode — full transaction_gas_budget
-        )?;
-
-        let per_authenticator_checked_input_objects = per_authenticator_input_objects
-            .into_iter()
-            .map(|objects| objects.into_checked())
-            .collect::<Vec<_>>();
-
-        // Create a checked union of input objects.
-        let mut input_objects_union = tx_input_objects.into_checked();
-        for objects in per_authenticator_checked_input_objects.iter() {
-            input_objects_union = checked_input_objects_union(input_objects_union, objects)?;
-        }
-
-        Ok((
-            gas_status,
-            per_authenticator_checked_input_objects,
-            input_objects_union,
-        ))
-    }
-
     // Common checks performed for transactions and certificates.
     fn check_transaction_input_inner(
         protocol_config: &ProtocolConfig,
