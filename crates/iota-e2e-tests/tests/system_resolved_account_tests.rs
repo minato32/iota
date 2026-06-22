@@ -1,10 +1,10 @@
 // Copyright (c) 2026 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-//! Built-in account tests
+//! System-resolved account tests
 //!
-//! End-to-end tests for the built-in account authentication flow with all
-//! `GenericSignature` types (Ed25519, Secp256k1, Secp256r1, MultiSig and
+//! End-to-end tests for the system-resolved account authentication flow with
+//! all `GenericSignature` types (Ed25519, Secp256k1, Secp256r1, MultiSig and
 //! Passkey), in both its variants:
 //!
 //! - IMPLICIT: no account object exists on chain; the node derives the expected
@@ -326,8 +326,8 @@ async fn test_explicit_detached_pk_fails() -> Result<(), anyhow::Error> {
 // --- D. Sponsored transactions ----------------------
 // ---------------------------------------------------
 
-/// Both the sender and the sponsor are implicit built-in accounts: each plain
-/// signature flows through its own synthetic builtin authenticator.
+/// Both the sender and the sponsor are implicit system-resolved accounts: each
+/// plain signature flows through its own synthetic builtin authenticator.
 #[sim_test]
 async fn test_sponsored_tx_implicit_sender_and_sponsor() -> Result<(), anyhow::Error> {
     telemetry_subscribers::init_for_testing();
@@ -468,8 +468,8 @@ async fn test_implicit_flag_off_rotated_explicit_account_bypassed() -> Result<()
         IotaKeyPair::Ed25519(Ed25519KeyPair::generate(&mut StdRng::from_seed([42u8; 32])));
     rotate_account_pk(&test_cluster, &mut actor, prefixed_pk_of(&new_key)).await?;
 
-    // The old key still works: with the implicit flag off, no builtin account
-    // objects are loaded and only legacy signature verification runs.
+    // The old key still works: with the implicit flag off, no system-resolved
+    // account objects are loaded and only legacy signature verification runs.
     let gas = fund(&test_cluster, sender).await;
     let tx_data = transfer_tx_data(&test_cluster, sender, gas).await;
     let sig = actor.sign(&tx_data).await;
@@ -721,7 +721,8 @@ impl Actor {
     }
 
     /// Signs `tx_data` and returns the plain (non-MoveAuthenticator)
-    /// `GenericSignature` that the node maps to a built-in account object.
+    /// `GenericSignature` that the node maps to a system-resolved account
+    /// object.
     ///
     /// Takes `&mut self` because the passkey signer drives a mock WebAuthn
     /// client.
@@ -807,8 +808,8 @@ async fn ptb_tx_data(
         .build()
 }
 
-/// Returns the object at the built-in account ID derived from `address`, if
-/// any.
+/// Returns the object at the system-resolved account ID derived from `address`,
+/// if any.
 async fn account_object(test_cluster: &TestCluster, address: Address) -> Option<Object> {
     test_cluster
         .get_object_from_fullnode_store(&ObjectId::from(address))

@@ -1018,7 +1018,7 @@ impl AuthorityState {
         let (
             tx_input_objects,
             tx_receiving_objects,
-            tx_built_in_account_objects,
+            tx_system_resolved_account_objects,
             per_authenticator_inputs,
         ) = self.read_objects_for_validation(transaction, protocol_config, epoch)?;
 
@@ -1028,13 +1028,13 @@ impl AuthorityState {
             per_authenticator_inputs,
         );
 
-        // Build implicit authenticators by matching each built-in account object
+        // Build implicit authenticators by matching each system-resolved account object
         // to the corresponding (non-MoveAuthenticator) signature.
         let implicit_authenticators = if protocol_config.enable_implicit_move_authentication()
-            && !tx_built_in_account_objects.is_empty()
+            && !tx_system_resolved_account_objects.is_empty()
         {
             Self::build_implicit_authenticators(
-                &tx_built_in_account_objects,
+                &tx_system_resolved_account_objects,
                 transaction.tx_signatures(),
             )?
         } else {
@@ -1430,7 +1430,7 @@ impl AuthorityState {
             return Ok((effects, None));
         }
 
-        let (tx_input_objects, tx_built_in_account_objects, per_authenticator_inputs) =
+        let (tx_input_objects, tx_system_resolved_account_objects, per_authenticator_inputs) =
             self.read_objects_for_execution(tx_guard.as_lock_guard(), transaction, epoch_store)?;
 
         // If no expected_effects_digest was provided, try to get it from storage.
@@ -1445,7 +1445,7 @@ impl AuthorityState {
             tx_guard,
             transaction,
             tx_input_objects,
-            tx_built_in_account_objects,
+            tx_system_resolved_account_objects,
             per_authenticator_inputs,
             expected_effects_digest,
             epoch_store,
@@ -1464,7 +1464,7 @@ impl AuthorityState {
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> IotaResult<(
         InputObjects,
-        BuiltInAccountObjects,
+        SystemResolvedAccountObjects,
         Vec<(InputObjects, ObjectReadResult)>,
     )> {
         let _scope = monitored_scope("Execution::load_input_objects");
@@ -1477,19 +1477,20 @@ impl AuthorityState {
 
         let input_objects = transaction.collect_all_input_object_kind_for_reading()?;
 
-        let built_in_account_objects = if protocol_config.enable_implicit_move_authentication() {
-            transaction.built_in_account_objects()?
-        } else {
-            vec![]
-        };
+        let system_resolved_account_objects =
+            if protocol_config.enable_implicit_move_authentication() {
+                transaction.system_resolved_account_objects()?
+            } else {
+                vec![]
+            };
 
-        let (input_objects, built_in_account_objects) =
+        let (input_objects, system_resolved_account_objects) =
             self.input_loader.read_objects_for_execution(
                 epoch_store,
                 &transaction.key(),
                 tx_lock,
                 &input_objects,
-                &built_in_account_objects,
+                &system_resolved_account_objects,
                 epoch_store.epoch(),
             )?;
 
@@ -1497,7 +1498,7 @@ impl AuthorityState {
             transaction.split_input_objects_into_groups_for_reading(input_objects)?;
         Ok((
             input_objects,
-            built_in_account_objects,
+            system_resolved_account_objects,
             per_authenticator_inputs,
         ))
     }
@@ -1584,7 +1585,7 @@ impl AuthorityState {
         tx_guard: TxGuard,
         transaction: &VerifiedExecutableTransaction,
         tx_input_objects: InputObjects,
-        tx_built_in_account_objects: BuiltInAccountObjects,
+        tx_system_resolved_account_objects: SystemResolvedAccountObjects,
         per_authenticator_inputs: Vec<(InputObjects, ObjectReadResult)>,
         expected_effects_digest: Option<TransactionEffectsDigest>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
@@ -1634,7 +1635,7 @@ impl AuthorityState {
             &execution_guard,
             transaction,
             tx_input_objects,
-            tx_built_in_account_objects,
+            tx_system_resolved_account_objects,
             per_authenticator_inputs,
             epoch_store,
         ) {
@@ -1837,7 +1838,7 @@ impl AuthorityState {
         _execution_guard: &ExecutionLockReadGuard<'_>,
         transaction: &VerifiedExecutableTransaction,
         tx_input_objects: InputObjects,
-        tx_built_in_account_objects: BuiltInAccountObjects,
+        tx_system_resolved_account_objects: SystemResolvedAccountObjects,
         per_authenticator_inputs: Vec<(InputObjects, ObjectReadResult)>,
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> IotaResult<(
@@ -1876,13 +1877,13 @@ impl AuthorityState {
             per_authenticator_inputs,
         );
 
-        // Build implicit authenticators by matching each built-in account object
+        // Build implicit authenticators by matching each system-resolved account object
         // to the corresponding (non-MoveAuthenticator) signature.
         let implicit_authenticators = if protocol_config.enable_implicit_move_authentication()
-            && !tx_built_in_account_objects.is_empty()
+            && !tx_system_resolved_account_objects.is_empty()
         {
             Self::build_implicit_authenticators(
-                &tx_built_in_account_objects,
+                &tx_system_resolved_account_objects,
                 transaction.data().tx_signatures(),
             )?
         } else {
@@ -5917,12 +5918,12 @@ impl AuthorityState {
         }
     }
 
-    /// For each built-in account object, finds the matching
+    /// For each system-resolved account object, finds the matching
     /// non-MoveAuthenticator signature (by signer address == object ID) and
     /// builds a synthetic [`MoveAuthenticator`] for it.
     #[allow(clippy::type_complexity)]
     fn build_implicit_authenticators<'a>(
-        tx_built_in_account_objects: &BuiltInAccountObjects,
+        tx_system_resolved_account_objects: &SystemResolvedAccountObjects,
         tx_signatures: &'a [GenericSignature],
     ) -> IotaResult<
         Vec<(
@@ -5931,7 +5932,7 @@ impl AuthorityState {
             Option<&'a GenericSignature>,
         )>,
     > {
-        tx_built_in_account_objects
+        tx_system_resolved_account_objects
             .iter()
             .map(|account_object| {
                 let sig = tx_signatures
@@ -5962,7 +5963,7 @@ impl AuthorityState {
     /// `CallArg::Pure` argument so the on-chain authenticator function can
     /// verify it.
     fn craft_synthetic_authenticator(
-        account_object_read: &BuiltInAccountObjectReadResult,
+        account_object_read: &SystemResolvedAccountObjectReadResult,
         signature: &GenericSignature,
     ) -> IotaResult<(MoveAuthenticator, InputObjects, ObjectReadResult)> {
         // Build `object_to_authenticate` based on the account object's ownership.
@@ -6014,21 +6015,22 @@ impl AuthorityState {
     ) -> IotaResult<(
         InputObjects,
         ReceivingObjects,
-        BuiltInAccountObjects,
+        SystemResolvedAccountObjects,
         Vec<(InputObjects, ObjectReadResult)>,
     )> {
-        let built_in_account_objects = if protocol_config.enable_implicit_move_authentication() {
-            transaction.built_in_account_objects()?
-        } else {
-            vec![]
-        };
+        let system_resolved_account_objects =
+            if protocol_config.enable_implicit_move_authentication() {
+                transaction.system_resolved_account_objects()?
+            } else {
+                vec![]
+            };
 
-        let (input_objects, tx_receiving_objects, built_in_account_objects) =
+        let (input_objects, tx_receiving_objects, system_resolved_account_objects) =
             self.input_loader.read_objects_for_signing(
                 Some(transaction.digest()),
                 &transaction.collect_all_input_object_kind_for_reading()?,
                 &transaction.data().transaction_data().receiving_objects(),
-                &built_in_account_objects,
+                &system_resolved_account_objects,
                 epoch,
             )?;
 
@@ -6038,7 +6040,7 @@ impl AuthorityState {
                 (
                     tx_input_objects,
                     tx_receiving_objects,
-                    built_in_account_objects,
+                    system_resolved_account_objects,
                     per_authenticator_inputs,
                 )
             })

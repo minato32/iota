@@ -2160,9 +2160,9 @@ impl SenderSignedData {
         Ok(input_objects_set.into_iter().collect::<Vec<_>>())
     }
 
-    pub fn built_in_account_objects(&self) -> IotaResult<Vec<ObjectId>> {
+    pub fn system_resolved_account_objects(&self) -> IotaResult<Vec<ObjectId>> {
         // System transactions carry a dummy signature and no real signer, so
-        // they can never authenticate a built-in account.
+        // they can never authenticate a system-resolved account.
         if self.transaction_data().is_system_tx() {
             return Ok(vec![]);
         }
@@ -3337,16 +3337,17 @@ impl From<Vec<ReceivingObjectReadResult>> for ReceivingObjects {
     }
 }
 
-// Result of attempting to read a built in account object. An object might exist
-// in the ledger, thus being Explicit, or it may not, thus being Implicit.
+// Result of attempting to read a system-resolved account object. An object
+// might exist in the ledger, thus being Explicit, or it may not, thus being
+// Implicit.
 #[derive(Clone, Debug)]
-pub enum BuiltInAccountObjectReadResultKind {
+pub enum SystemResolvedAccountObjectReadResultKind {
     Explicit(Object),
     // The account object is not actually present in the ledger.
     Implicit,
 }
 
-impl BuiltInAccountObjectReadResultKind {
+impl SystemResolvedAccountObjectReadResultKind {
     pub fn as_object(&self) -> Option<&Object> {
         match &self {
             Self::Explicit(object) => Some(object),
@@ -3355,20 +3356,20 @@ impl BuiltInAccountObjectReadResultKind {
     }
 }
 
-pub struct BuiltInAccountObjectReadResult {
+pub struct SystemResolvedAccountObjectReadResult {
     pub object_id: ObjectId,
-    pub object: BuiltInAccountObjectReadResultKind,
+    pub object: SystemResolvedAccountObjectReadResultKind,
 }
 
-impl BuiltInAccountObjectReadResult {
-    pub fn new(object_id: ObjectId, object: BuiltInAccountObjectReadResultKind) -> Self {
+impl SystemResolvedAccountObjectReadResult {
+    pub fn new(object_id: ObjectId, object: SystemResolvedAccountObjectReadResultKind) -> Self {
         Self { object_id, object }
     }
 
     pub fn is_explicit_immutable(&self) -> bool {
         matches!(
             &self.object,
-            BuiltInAccountObjectReadResultKind::Explicit(obj) if obj.is_immutable()
+            SystemResolvedAccountObjectReadResultKind::Explicit(obj) if obj.is_immutable()
         )
     }
 
@@ -3378,22 +3379,27 @@ impl BuiltInAccountObjectReadResult {
 
     pub fn initial_shared_version(&self) -> Option<SequenceNumber> {
         match &self.object {
-            BuiltInAccountObjectReadResultKind::Explicit(obj) => match obj.owner() {
+            SystemResolvedAccountObjectReadResultKind::Explicit(obj) => match obj.owner() {
                 Owner::Shared(initial_shared_version) => Some(*initial_shared_version),
                 _ => None,
             },
-            BuiltInAccountObjectReadResultKind::Implicit => Some(object::OBJECT_START_VERSION),
+            SystemResolvedAccountObjectReadResultKind::Implicit => {
+                Some(object::OBJECT_START_VERSION)
+            }
         }
     }
 
     pub fn is_implicit(&self) -> bool {
-        matches!(self.object, BuiltInAccountObjectReadResultKind::Implicit)
+        matches!(
+            self.object,
+            SystemResolvedAccountObjectReadResultKind::Implicit
+        )
     }
 
     pub fn is_shared_or_implicit(&self) -> bool {
         match &self.object {
-            BuiltInAccountObjectReadResultKind::Implicit => true,
-            BuiltInAccountObjectReadResultKind::Explicit(obj) => obj.is_shared(),
+            SystemResolvedAccountObjectReadResultKind::Implicit => true,
+            SystemResolvedAccountObjectReadResultKind::Explicit(obj) => obj.is_shared(),
         }
     }
 
@@ -3402,8 +3408,8 @@ impl BuiltInAccountObjectReadResult {
     }
 }
 
-impl From<&BuiltInAccountObjectReadResult> for ObjectReadResult {
-    fn from(account_object: &BuiltInAccountObjectReadResult) -> Self {
+impl From<&SystemResolvedAccountObjectReadResult> for ObjectReadResult {
+    fn from(account_object: &SystemResolvedAccountObjectReadResult) -> Self {
         let input_object_kind = if account_object.is_explicit_immutable() {
             InputObjectKind::ImmOrOwnedMoveObject(
                 account_object
@@ -3422,10 +3428,10 @@ impl From<&BuiltInAccountObjectReadResult> for ObjectReadResult {
         };
 
         let object_read_result_kind = match &account_object.object {
-            BuiltInAccountObjectReadResultKind::Explicit(obj) => {
+            SystemResolvedAccountObjectReadResultKind::Explicit(obj) => {
                 ObjectReadResultKind::Object(obj.clone())
             }
-            BuiltInAccountObjectReadResultKind::Implicit => ObjectReadResultKind::Object(
+            SystemResolvedAccountObjectReadResultKind::Implicit => ObjectReadResultKind::Object(
                 Object::new_shared_implicit_account_object(account_object.id()),
             ),
         };
@@ -3434,18 +3440,18 @@ impl From<&BuiltInAccountObjectReadResult> for ObjectReadResult {
     }
 }
 
-impl From<Object> for BuiltInAccountObjectReadResultKind {
+impl From<Object> for SystemResolvedAccountObjectReadResultKind {
     fn from(object: Object) -> Self {
         Self::Explicit(object)
     }
 }
 
-pub struct BuiltInAccountObjects {
-    pub objects: Vec<BuiltInAccountObjectReadResult>,
+pub struct SystemResolvedAccountObjects {
+    pub objects: Vec<SystemResolvedAccountObjectReadResult>,
 }
 
-impl BuiltInAccountObjects {
-    pub fn iter(&self) -> impl Iterator<Item = &BuiltInAccountObjectReadResult> {
+impl SystemResolvedAccountObjects {
+    pub fn iter(&self) -> impl Iterator<Item = &SystemResolvedAccountObjectReadResult> {
         self.objects.iter()
     }
 
@@ -3458,8 +3464,8 @@ impl BuiltInAccountObjects {
     }
 }
 
-impl From<Vec<BuiltInAccountObjectReadResult>> for BuiltInAccountObjects {
-    fn from(objects: Vec<BuiltInAccountObjectReadResult>) -> Self {
+impl From<Vec<SystemResolvedAccountObjectReadResult>> for SystemResolvedAccountObjects {
+    fn from(objects: Vec<SystemResolvedAccountObjectReadResult>) -> Self {
         Self { objects }
     }
 }
