@@ -95,6 +95,14 @@ pub fn unmark_db_corruption(path: &Path) -> Result<(), Error> {
     rocksdb::DB::open_default(path)?.put(DB_CORRUPTED_KEY, [0])
 }
 
+/// Write options tuned for one-shot bulk ingestion into a freshly created
+/// store.
+pub fn bulk_ingestion_write_options() -> rocksdb::WriteOptions {
+    let mut opts = rocksdb::WriteOptions::default();
+    opts.disable_wal(true);
+    opts
+}
+
 /// Opens a database with options, and a number of column families with
 /// individual options that are created if they do not exist.
 #[tracing::instrument(level="debug", skip_all, fields(path = ?path.as_ref()), err)]

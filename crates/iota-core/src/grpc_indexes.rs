@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use typed_store::{
     DBMapUtils, TypedStoreError,
-    rocks::{DBMap, MetricConf},
+    rocks::{DBMap, MetricConf, bulk_ingestion_write_options},
     traits::Map,
 };
 
@@ -513,7 +513,9 @@ impl IndexStoreTables {
             self.index_epoch(&checkpoint_data, &mut batch)?;
             self.index_transactions(&checkpoint_data, &mut batch)?;
 
-            batch.write().map_err(StorageError::from)
+            batch
+                .write_opt(&bulk_ingestion_write_options())
+                .map_err(StorageError::from)
         })?;
 
         info!(
@@ -960,6 +962,14 @@ impl GrpcIndexesStore {
                     .init(&authority_store, checkpoint_store)
                     .expect("unable to initialize gRPC index");
 
+                // Flush all data to disk before dropping tables. This is critical because
+                // WAL is disabled for the bulk writes during initialization. We only need
+                // to flush one table because all tables share the same underlying database.
+                tables
+                    .meta
+                    .flush()
+                    .expect("failed to flush gRPC index tables to disk");
+
                 let weak_db = Arc::downgrade(&tables.meta.db);
                 drop(tables);
 
@@ -975,7 +985,22 @@ impl GrpcIndexesStore {
                 }
 
                 // Reopen the DB with default options (eg without `unordered_write`s enabled)
-                IndexStoreTables::open(&path)
+                let reopened_tables = IndexStoreTables::open(&path);
+
+                // Sanity check: verify the database version was persisted correctly, i.e.
+                // the WAL-disabled bulk writes were flushed before the reopen.
+                let stored_version = reopened_tables
+                    .meta
+                    .get(&())
+                    .expect("failed to read metadata from reopened database")
+                    .expect("metadata not found in reopened database");
+                assert_eq!(
+                    stored_version.version, CURRENT_DB_VERSION,
+                    "database version mismatch after flush and reopen: expected {}, found {}",
+                    CURRENT_DB_VERSION, stored_version.version
+                );
+
+                reopened_tables
             } else {
                 tables
             }
@@ -1338,14 +1363,15 @@ impl LiveObjectIndexer for GrpcLiveObjectIndexer<'_> {
         // If the batch size grows to greater that 128MB then write out to the DB so
         // that the data we need to hold in memory doesn't grown unbounded.
         if self.batch.size_in_bytes() >= 1 << 27 {
-            std::mem::replace(&mut self.batch, self.tables.owner.batch()).write()?;
+            std::mem::replace(&mut self.batch, self.tables.owner.batch())
+                .write_opt(&bulk_ingestion_write_options())?;
         }
 
         Ok(())
     }
 
     fn finish(self) -> Result<(), StorageError> {
-        self.batch.write()?;
+        self.batch.write_opt(&bulk_ingestion_write_options())?;
         Ok(())
     }
 }
