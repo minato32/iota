@@ -185,11 +185,8 @@ mod test {
         let db_registry = Registry::new();
         DBMetrics::init(&db_registry);
 
-        // Enable fast commit sync (always enabled in this test)
-        let mut protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
-        protocol_config.set_consensus_fast_commit_sync_for_testing(true);
+        let protocol_config = ProtocolConfig::get_for_max_version_UNSAFE();
 
-        // Calculate timing based on flags
         let run_time = if long_run {
             Duration::from_secs(LONG_DURATION_SECS)
         } else {
