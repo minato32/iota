@@ -238,6 +238,12 @@ pub enum RunSpec {
         slow_n: Vec<u64>,
         #[arg(long, num_args(1..), value_delimiter = ',', default_values_t = [100])]
         slow_size: Vec<u64>,
+        // Whether each `slow` tx carries a mutable shared object input. Default
+        // true => activates shared-object congestion control (the historic
+        // behavior). Set false for owned-object-only (pure compute) slow txs,
+        // isolating attestation dry-run cost from the congestion-control path.
+        #[arg(long, num_args(1..), value_delimiter = ',', default_values_t = [true])]
+        slow_shared: Vec<bool>,
         // type and load % of adversarial transactions in the benchmark workload.
         // Format is "{adversarial_type}-{load_factor}".
         // `load_factor` is a number between 0.0 and 1.0 which dictates how much load per tx

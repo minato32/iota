@@ -38,6 +38,11 @@ pub struct SlowTestPayload {
     /// `slow::slow(n, size)` args: create `n` vectors of `size` bytes.
     slow_n: u64,
     slow_size: u64,
+    /// When true, attach an (unused) mutable shared object input to activate
+    /// shared-object congestion control. When false, the tx is
+    /// owned-object-only (pure compute) — useful to measure attestation
+    /// dry-run cost in isolation, without the congestion-control path.
+    slow_shared: bool,
     state: InMemoryWallet,
     system_state_observer: Arc<SystemStateObserver>,
 }
@@ -90,13 +95,17 @@ impl SlowTestPayload {
         );
 
         // Add unused mutable shared object input to activate congestion control.
-        builder
-            .obj(CallArg::Shared(SharedObjectRef {
-                object_id: self.shared_object_ref.object_id,
-                initial_shared_version: self.shared_object_ref.version,
-                mutable: true,
-            }))
-            .unwrap();
+        // Skipped when slow_shared=false, leaving an owned-object-only (pure
+        // compute) tx that never hits shared-object congestion control.
+        if self.slow_shared {
+            builder
+                .obj(CallArg::Shared(SharedObjectRef {
+                    object_id: self.shared_object_ref.object_id,
+                    initial_shared_version: self.shared_object_ref.version,
+                    mutable: true,
+                }))
+                .unwrap();
+        }
 
         TestTransactionBuilder::new(self.sender, account.gas, gas_price)
             .programmable(builder.finish())
@@ -109,6 +118,7 @@ pub struct SlowWorkloadBuilder {
     num_payloads: u64,
     slow_n: u64,
     slow_size: u64,
+    slow_shared: bool,
 }
 
 #[async_trait]
@@ -151,6 +161,7 @@ impl WorkloadBuilder<dyn Payload> for SlowWorkloadBuilder {
             },
             slow_n: self.slow_n,
             slow_size: self.slow_size,
+            slow_shared: self.slow_shared,
             init_gas: init_gas.pop().unwrap(),
             payload_gas,
         }))
@@ -166,6 +177,7 @@ impl SlowWorkloadBuilder {
         in_flight_ratio: u64,
         slow_n: u64,
         slow_size: u64,
+        slow_shared: bool,
         duration: Interval,
         group: u32,
     ) -> Option<WorkloadBuilderInfo> {
@@ -187,6 +199,7 @@ impl SlowWorkloadBuilder {
                     num_payloads: max_ops,
                     slow_n,
                     slow_size,
+                    slow_shared,
                 }));
             let builder_info = WorkloadBuilderInfo {
                 workload_params,
@@ -206,6 +219,9 @@ pub struct SlowWorkload {
     /// `slow::slow(n, size)` args.
     slow_n: u64,
     slow_size: u64,
+    /// When false, payloads omit the shared-object input (owned-only, no
+    /// congestion).
+    slow_shared: bool,
     /// Shared object refs for checking max reads with contention
     // shared_objs: Vec<BenchMoveCallArg>,
     pub init_gas: Gas,
@@ -268,6 +284,7 @@ impl Workload<dyn Payload> for SlowWorkload {
                 sender: gas.1,
                 slow_n: self.slow_n,
                 slow_size: self.slow_size,
+                slow_shared: self.slow_shared,
                 state: InMemoryWallet::new(gas),
                 system_state_observer: system_state_observer.clone(),
             })
