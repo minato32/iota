@@ -37,6 +37,7 @@ use crate::{
     },
     context::Context,
     cordial_knowledge::CordialKnowledgeMessage,
+    error::ConsensusResult,
     leader_scoring::{ReputationScores, ScoringSubdag},
     misbehavior_store::{MisbehaviorCounts, MisbehaviorStore},
     storage::{Store, WriteBatch},
@@ -381,7 +382,10 @@ impl DagState {
                         }
 
                         let committed_subdag =
-                            load_pending_subdag_from_store(store.as_ref(), commit.clone(), vec![]);
+                            load_pending_subdag_from_store(store.as_ref(), commit.clone(), vec![])
+                                .unwrap_or_else(|e| {
+                                    panic!("Failed to recover pending subdag: {e:?}")
+                                });
                         unscored_committed_subdags.push(committed_subdag.base);
                     });
             }
@@ -632,7 +636,8 @@ impl DagState {
         let mut unscored_subdags = Vec::with_capacity(commits.len());
         for commit in commits {
             let pending_subdag =
-                load_pending_subdag_from_store(self.store.as_ref(), commit, vec![]);
+                load_pending_subdag_from_store(self.store.as_ref(), commit, vec![])
+                    .unwrap_or_else(|e| panic!("Failed to recover pending subdag: {e:?}"));
             unscored_subdags.push(pending_subdag.base);
         }
 
@@ -1051,6 +1056,18 @@ impl DagState {
         &self,
         transactions_refs: &[GenericTransactionRef],
     ) -> Vec<Option<VerifiedTransactions>> {
+        self.try_get_verified_transactions(transactions_refs)
+            .unwrap_or_else(|e| panic!("Failed to read from storage: {e:?}"))
+    }
+
+    /// Returns verified transactions from memory or storage.
+    ///
+    /// # Errors
+    /// Returns a storage error when persisted transactions cannot be read.
+    pub(crate) fn try_get_verified_transactions(
+        &self,
+        transactions_refs: &[GenericTransactionRef],
+    ) -> ConsensusResult<Vec<Option<VerifiedTransactions>>> {
         let mut transactions = vec![None; transactions_refs.len()];
         let mut missing = Vec::new();
 
@@ -1072,17 +1089,14 @@ impl DagState {
         }
 
         if missing.is_empty() {
-            return transactions;
+            return Ok(transactions);
         }
 
         let missing_refs = missing
             .iter()
             .map(|(_, block_ref)| **block_ref)
             .collect::<Vec<_>>();
-        let store_results = self
-            .store
-            .read_verified_transactions(&missing_refs)
-            .unwrap_or_else(|e| panic!("Failed to read from storage: {e:?}"));
+        let store_results = self.store.read_verified_transactions(&missing_refs)?;
         self.context
             .metrics
             .node_metrics
@@ -1094,28 +1108,7 @@ impl DagState {
             transactions[index] = result;
         }
 
-        transactions
-    }
-
-    /// Returns all verified transactions or the list of missing transaction
-    /// refs. This is the canonical way to load transactions for
-    /// CommittedSubDag construction.
-    pub(crate) fn try_get_all_verified_transactions(
-        &self,
-        tx_refs: &[GenericTransactionRef],
-    ) -> Result<Vec<VerifiedTransactions>, Vec<GenericTransactionRef>> {
-        let results = self.get_verified_transactions(tx_refs);
-        let mut missing = Vec::new();
-        for (i, tx_opt) in results.iter().enumerate() {
-            if tx_opt.is_none() {
-                missing.push(tx_refs[i]);
-            }
-        }
-        if missing.is_empty() {
-            Ok(results.into_iter().map(|tx| tx.unwrap()).collect())
-        } else {
-            Err(missing)
-        }
+        Ok(transactions)
     }
 
     /// Gets serialized transactions by checking cached recent transactions in
