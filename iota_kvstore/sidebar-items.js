@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Table"],"mod":["client","proto"],"struct":["BigTableClient","Cell","Checkpoint","KvWorker","Row","TransactionData"],"trait":["KeyValueStoreReader","KeyValueStoreWriter"]};

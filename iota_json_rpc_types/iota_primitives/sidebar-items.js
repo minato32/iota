@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Address","Base58","Base64","GenericSignature","Identifier","ObjectId","ProtocolVersion","SequenceNumberString","SequenceNumberU64","StructTag","TypeTag"]};

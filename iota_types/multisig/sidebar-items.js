@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"attr":["enum_dispatch"],"enum":["MultisigMemberSignature"],"struct":["MultiSig","MultiSigPublicKey","MultisigMember"],"type":["BitmapUnit","ThresholdUnit","WeightUnit"]};

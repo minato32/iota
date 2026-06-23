@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IotaGasStatus"],"fn":["deduct_gas","get_gas_balance"],"trait":["IotaGasStatusAPI"]};
